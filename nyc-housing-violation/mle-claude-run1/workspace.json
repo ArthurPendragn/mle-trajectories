@@ -1,0 +1,9 @@
+{
+  "id": "housing_violation_risk_20260924_223532_eb8b",
+  "created_at": "2026-09-24T20:35:32.897060+00:00",
+  "input_source": null,
+  "venv": "/home/estrauss-ldap/repos/mle-claude/.venv",
+  "cwd_at_creation": "/home/estrauss-ldap/repos/mle-claude",
+  "scoring": "average_precision",
+  "cv": "CutoffSplit(expanding: 2020->2021, 2020+2021->2022)"
+}
