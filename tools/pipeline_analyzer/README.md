@@ -244,6 +244,7 @@ Options:
 - `--sample-rows N`  cap `read_csv` at N rows. A full sweep on a large table can
   take days; a sample makes it minutes. Stored per entry, and an entry measured
   at a different sample size is re-measured rather than silently mixed in
+- `--scoring NAME`   scorer for plan-only files (default: `workspace.json`)
 - `--only NAME …`, `--limit N`  measure a subset
 - `--timeout S`      per pipeline, killing the whole process group (default 3600)
 - `--force`, `--retry-failed`  re-measure cached / previously failed entries
@@ -268,6 +269,20 @@ under `scheduler=True`) and the scheduler can be timed and queried for stats; th
 call returns a shim whose `results_` looks like skrub's pandas frame, because
 stratum's is a polars frame keyed `id`/`scores`, so each file's own reporting
 block still prints its score.
+
+Files run under `skrub.config_context(eager_data_ops=False)`, as in the
+static loader, so building a plan computes no previews (on a data-lake plan
+they re-read every table before scoring starts). This changes `total_s` and
+the pre-scoring memory curve, not the scored `wall_s`; entries carry
+`eager_previews: false`.
+
+**Plan-only files** (mle-claude): a pipeline that only defines a module-level
+`pred` and leaves scoring to its harness is scored after it ran, the way that
+harness did — `pred.skb.make_grid_search(fitted=True, refit=False)`, no `cv=`,
+with `--scoring` (default: `scoring` from the `workspace.json` beside the
+pipelines folder). Such entries carry `scored_by`. The mle-claude harness passes
+`scoring=None` when a plan declares `.skb.with_scoring`; that case hits the
+known gap below, so it is only safe while the run's scorer is a string.
 
 `cv` is left to stratum: `grid_search._resolve_cv` prioritises an explicit `cv`
 and otherwise uses the splitter declared on the plan via

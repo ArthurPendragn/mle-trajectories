@@ -115,7 +115,8 @@ def is_fresh(entry: dict, path: Path, sample_rows: int | None,
 # --------------------------------------------------------------------------- #
 def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
             sample_rows: int | None, stats: bool, mem_mode: str = "process",
-            mem_interval: float = 0.1, mem_csv: Path | None = None) -> dict:
+            mem_interval: float = 0.1, mem_csv: Path | None = None,
+            scoring: str | None = None) -> dict:
     """Measure one pipeline in a subprocess. Never raises."""
     fd, out_json = tempfile.mkstemp(suffix=".json")
     os.close(fd)
@@ -126,6 +127,8 @@ def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
     if not stats:
         cmd.append("--no-stats")
     cmd += ["--mem-mode", mem_mode, "--mem-interval", str(mem_interval)]
+    if scoring:
+        cmd += ["--scoring", scoring]
     if mem_csv:
         mem_csv.parent.mkdir(parents=True, exist_ok=True)
         cmd += ["--mem-csv", str(mem_csv)]
@@ -290,6 +293,10 @@ def main(argv=None) -> int:
     ap.add_argument("--no-mem-csv", action="store_true",
                     help="keep only the downsampled curve in the store, without "
                          "writing the full sample series per pipeline")
+    ap.add_argument("--scoring", default=None,
+                    help="scorer for files that only define `pred` and leave "
+                         "scoring to a harness (mle-claude); default: `scoring` "
+                         "from workspace.json beside the pipelines folder")
     ap.add_argument("--list", action="store_true",
                     help="show what the store holds and what a sweep would run")
     args = ap.parse_args(argv)
@@ -377,6 +384,10 @@ def main(argv=None) -> int:
     if args.sample_rows:
         print(f"  sample: {args.sample_rows} rows", file=sys.stderr)
 
+    scoring = args.scoring or _workspace_scoring(pipe_dirs[0])
+    if scoring:
+        print(f"  scoring for plan-only files: {scoring}", file=sys.stderr)
+
     store["version"] = STORE_VERSION
     mem_dir = None if args.no_mem_csv else store_path.with_suffix(".mem")
     store["meta"].update(
@@ -385,7 +396,7 @@ def main(argv=None) -> int:
         cv_from_plan="stratum grid_search resolves mark_as_X(cv=...)",
         mem_mode=args.mem_mode, mem_interval_s=args.mem_interval,
         mem_csv_dir=str(mem_dir.name) if mem_dir else None,
-        versions=versions,
+        versions=versions, scoring=scoring,
     )
 
     failures = 0
@@ -395,7 +406,8 @@ def main(argv=None) -> int:
                         timeout=args.timeout, sample_rows=args.sample_rows,
                         stats=not args.no_stats, mem_mode=args.mem_mode,
                         mem_interval=args.mem_interval,
-                        mem_csv=(mem_dir / f"{name}.csv") if mem_dir else None)
+                        mem_csv=(mem_dir / f"{name}.csv") if mem_dir else None,
+                        scoring=scoring)
         entry["path"] = str(path.relative_to(pipe_dirs[0].parent)
                             if path.is_relative_to(pipe_dirs[0].parent) else path)
         # Per entry, not just per store: a sweep interrupted halfway leaves a
@@ -412,6 +424,15 @@ def main(argv=None) -> int:
     print(f"\n{len(todo)} measured ({failures} failed) · store now holds "
           f"{ok}/{len(store['pipelines'])} ok · {store_path}", file=sys.stderr)
     return 1 if failures else 0
+
+
+def _workspace_scoring(pipe_dir: Path) -> str | None:
+    """The scorer an mle-claude harness locked, from the run's workspace.json."""
+    ws = pipe_dir.parent / "workspace.json"
+    try:
+        return json.loads(ws.read_text()).get("scoring")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
 
 
 def _warn_about_data(run_in: Path) -> None:

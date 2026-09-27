@@ -20,6 +20,15 @@ block runs), with two interventions:
    no pipeline needs editing.
 2. ``--sample-rows N`` caps ``pandas.read_csv`` at N rows, so a sweep can be
    done at a fraction of the cost. Recorded in the output; never a default.
+3. A file that only *defines* a plan (module-level ``pred``, the mle-claude
+   convention: its harness did the scoring) is scored after it ran, the way that
+   harness did -- ``pred.skb.make_grid_search(fitted=True, refit=False)`` with no
+   ``cv=`` and ``--scoring`` -- through the same replaced ``make_grid_search``.
+4. The file runs under ``skrub.config_context(eager_data_ops=False)``, so
+   building the plan computes no previews: without it every recorded op is
+   evaluated once at build time, which on a data-lake plan re-reads every table
+   before the scored run starts. Only ``total_s`` and the memory curve before
+   ``scored_from_s`` change; the scored ``wall_s`` does not.
 
 Memory is sampled by ``memory_tracker.MemoryTracker``, a side-car process
 polling RSS every 100 ms, which gives the shape of the run and not just its
@@ -164,8 +173,9 @@ def _scores(results) -> list[float]:
 
 def measure(path: Path, *, sample_rows: int | None, stats: bool,
             mem_mode: str = "process", mem_interval: float = 0.1,
-            mem_csv: Path | None = None) -> dict:
+            mem_csv: Path | None = None, scoring: str | None = None) -> dict:
     import pandas as pd
+    import skrub
     import stratum
     from skrub._data_ops._skrub_namespace import SkrubNamespace
     from stratum._api import grid_search as stratum_grid_search
@@ -242,7 +252,14 @@ def measure(path: Path, *, sample_rows: int | None, stats: bool,
         tracker.start()
     t0 = time.perf_counter()
     try:
-        runpy.run_path(str(path), run_name="__main__")
+        with skrub.config_context(eager_data_ops=False):
+            module = runpy.run_path(str(path), run_name="__main__")
+            pred = module.get("pred")
+            if out["status"] != "ok" and hasattr(pred, "skb"):
+                # A plan-only file: score it as its harness did.
+                out["scored_by"] = "runner (module-level pred)"
+                pred.skb.make_grid_search(n_jobs=1, fitted=True, refit=False,
+                                          scoring=scoring)
     except Exception as exc:  # noqa: BLE001 - reported, not raised
         detail = f"{type(exc).__name__}: {exc}"
         if out["status"] == "ok":
@@ -276,6 +293,7 @@ def measure(path: Path, *, sample_rows: int | None, stats: bool,
         resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 1024, 1)
     out["sample_rows"] = sample_rows
     out["stats_enabled"] = stats
+    out["eager_previews"] = False
     return out
 
 
@@ -286,6 +304,8 @@ def main(argv=None) -> int:
     ap.add_argument("out", type=Path)
     ap.add_argument("--sample-rows", type=int, default=None)
     ap.add_argument("--no-stats", action="store_true")
+    ap.add_argument("--scoring", default=None,
+                    help="scorer for a file that only defines `pred`")
     ap.add_argument("--mem-mode", default="process",
                     choices=("process", "system", "off"))
     ap.add_argument("--mem-interval", type=float, default=0.1)
@@ -295,7 +315,8 @@ def main(argv=None) -> int:
 
     result = measure(args.pipeline, sample_rows=args.sample_rows,
                      stats=not args.no_stats, mem_mode=args.mem_mode,
-                     mem_interval=args.mem_interval, mem_csv=args.mem_csv)
+                     mem_interval=args.mem_interval, mem_csv=args.mem_csv,
+                     scoring=args.scoring)
     args.out.write_text(json.dumps(result))
     return 0 if result.get("status") == "ok" else 1
 

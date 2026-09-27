@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "catboost>=1.2.10",
+    "gcsfs",           # data-lake runs (nyc-housing-violation) read gs:// -- pinned below
     "graphviz>=0.21",
     "ipykernel>=7.3.0",
     "kaggle>=2.2.4",
@@ -41,5 +42,9 @@ url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "8b7f7ba3c632af28b138c388695988170d6874c3" }
+stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "093722376b3e8ec80376143196cd727d374eff17" }
 torch = { index = "pytorch-cu126" }
+# The gcsfs 2026.8.1 release can deadlock closing a file (prefetcher close ->
+# "Calling sync() from within a running loop"); a data-lake pipeline then hangs
+# forever. Pin the commit with the fix -- the same one mle-claude uses.
+gcsfs = { git = "https://github.com/fsspec/gcsfs", rev = "9290d6f242eeb3e9d6b539f2f0beae017315f32a" }
