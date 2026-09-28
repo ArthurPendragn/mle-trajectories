@@ -1,0 +1,970 @@
+{
+ "version": 1,
+ "meta": {
+  "pipelines": [
+   "/home/estrauss-ldap/repos/mle-trajectories/nyc-housing-violation/mle-claude-run1_v2/pipelines"
+  ],
+  "run_in": "/home/estrauss-ldap/repos/mle-trajectories/nyc-housing-violation/mle-claude-run1_v2/pipelines",
+  "sample_rows": null,
+  "stats_enabled": true,
+  "cv_from_plan": "stratum grid_search resolves mark_as_X(cv=...)",
+  "mem_mode": "process",
+  "mem_interval_s": 0.1,
+  "mem_csv_dir": "runtime_stats_pipelines.mem",
+  "versions": {
+   "stratum": "0.0.0.dev2",
+   "stratum_commit": "dfd9ca1d55bb71f4630249e9ccebe0d6317117ae",
+   "skrub": "0.8.0",
+   "sklearn": "1.8.0",
+   "python": "3.14.7"
+  },
+  "scoring": "average_precision"
+ },
+ "pipelines": {
+  "pipeline_01": {
+   "status": "ok",
+   "error": null,
+   "scored_by": "runner (module-level pred)",
+   "wall_s": 85.834,
+   "op_time_s": 71.6329,
+   "buffer_overhead_s": 13.7462,
+   "n_op_calls": 457,
+   "ops": [
+    {
+     "op": "PandasReadParquet(gs://mle-nyc-lake/tasks/housing_violation_risk/v1... [df]",
+     "count": 3,
+     "time_s": 13.986929
+    },
+    {
+     "op": "SkrubTableVectorizer",
+     "count": 4,
+     "time_s": 12.862138
+    },
+    {
+     "op": "SklearnHistGradientBoosting",
+     "count": 4,
+     "time_s": 8.121017
+    },
+    {
+     "op": "PandasColumnMethodOp(astype)",
+     "count": 10,
+     "time_s": 7.437302
+    },
+    {
+     "op": "MethodCallOp(merge)",
+     "count": 10,
+     "time_s": 7.090348
+    },
+    {
+     "op": "PandasJoinOp [df]",
+     "count": 8,
+     "time_s": 5.604762
+    },
+    {
+     "op": "MethodCallOp(zfill)",
+     "count": 4,
+     "time_s": 3.131327
+    },
+    {
+     "op": "MethodCallOp(agg)",
+     "count": 12,
+     "time_s": 2.148554
+    },
+    {
+     "op": "PandasStringMethodOp(REPLACE)",
+     "count": 6,
+     "time_s": 2.02328
+    },
+    {
+     "op": "NumericOp(subtract)",
+     "count": 8,
+     "time_s": 1.136555
+    },
+    {
+     "op": "PandasStringMethodOp(FULLMATCH)",
+     "count": 6,
+     "time_s": 1.054036
+    },
+    {
+     "op": "PandasAssignMapOp(assign: age) [df]",
+     "count": 4,
+     "time_s": 0.98746
+    },
+    {
+     "op": "PandasStringMethodOp(STRIP)",
+     "count": 10,
+     "time_s": 0.64249
+    },
+    {
+     "op": "PandasIndexSelectionOp(mask) [df]",
+     "count": 7,
+     "time_s": 0.592454
+    },
+    {
+     "op": "MethodCallOp(map)",
+     "count": 2,
+     "time_s": 0.5679
+    },
+    {
+     "op": "NumericOp(add)",
+     "count": 5,
+     "time_s": 0.550276
+    },
+    {
+     "op": "PandasGetItemOp(BinOp)",
+     "count": 12,
+     "time_s": 0.479301
+    },
+    {
+     "op": "MethodCallOp(fullmatch)",
+     "count": 2,
+     "time_s": 0.427181
+    },
+    {
+     "op": "MethodCallOp(join)",
+     "count": 8,
+     "time_s": 0.314185
+    },
+    {
+     "op": "MethodCallOp(sort_values)",
+     "count": 1,
+     "time_s": 0.260813
+    },
+    {
+     "op": "MethodCallOp(fillna)",
+     "count": 15,
+     "time_s": 0.257418
+    },
+    {
+     "op": "MethodCallOp(drop_duplicates)",
+     "count": 10,
+     "time_s": 0.242445
+    },
+    {
+     "op": "MethodCallOp(eq)",
+     "count": 16,
+     "time_s": 0.223063
+    },
+    {
+     "op": "MethodCallOp(where)",
+     "count": 8,
+     "time_s": 0.177914
+    },
+    {
+     "op": "PandasAssignMapOp(assign: bbl, cutoff) [df]",
+     "count": 3,
+     "time_s": 0.149901
+    },
+    {
+     "op": "BinOp(lt)",
+     "count": 3,
+     "time_s": 0.142538
+    },
+    {
+     "op": "BinOp(ge)",
+     "count": 3,
+     "time_s": 0.135997
+    },
+    {
+     "op": "PandasAssignMapOp(assign: viol_n90d, viol_n365d, viol_n1095d, viol_... [df]",
+     "count": 4,
+     "time_s": 0.115631
+    },
+    {
+     "op": "PandasStringMethodOp(UPPER)",
+     "count": 2,
+     "time_s": 0.106331
+    },
+    {
+     "op": "PandasIndexSelectionOp(drop_duplicates) [df]",
+     "count": 4,
+     "time_s": 0.102448
+    },
+    {
+     "op": "PandasDatetimeConversionOp",
+     "count": 2,
+     "time_s": 0.099519
+    },
+    {
+     "op": "Split(Train/Test) [df]",
+     "count": 4,
+     "time_s": 0.095944
+    },
+    {
+     "op": "ScoreCandidates(default) [df]",
+     "count": 2,
+     "time_s": 0.093981
+    },
+    {
+     "op": "BinOp(and)",
+     "count": 19,
+     "time_s": 0.05517
+    },
+    {
+     "op": "NumericOp(divide)",
+     "count": 8,
+     "time_s": 0.038779
+    },
+    {
+     "op": "PandasConcatOp [df]",
+     "count": 1,
+     "time_s": 0.033296
+    },
+    {
+     "op": "MethodCallOp(le)",
+     "count": 28,
+     "time_s": 0.027062
+    },
+    {
+     "op": "BinOp(eq)",
+     "count": 1,
+     "time_s": 0.024774
+    },
+    {
+     "op": "MethodCallOp(assign)",
+     "count": 32,
+     "time_s": 0.022054
+    },
+    {
+     "op": "BinOp(le)",
+     "count": 8,
+     "time_s": 0.011049
+    },
+    {
+     "op": "BinOp(floordiv)",
+     "count": 12,
+     "time_s": 0.010583
+    },
+    {
+     "op": "BinOp(gt)",
+     "count": 8,
+     "time_s": 0.009788
+    },
+    {
+     "op": "PandasGetItemOp(['bbl', 'cutoff'])",
+     "count": 10,
+     "time_s": 0.007124
+    },
+    {
+     "op": "MethodCallOp(dropna)",
+     "count": 2,
+     "time_s": 0.004833
+    },
+    {
+     "op": "MethodCallOp(drop)",
+     "count": 5,
+     "time_s": 0.003521
+    },
+    {
+     "op": "MethodCallOp(groupby)",
+     "count": 8,
+     "time_s": 0.002893
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols[['bbl', 'cutoff']]) [df]",
+     "count": 4,
+     "time_s": 0.002864
+    },
+    {
+     "op": "PandasDropOp [df]",
+     "count": 3,
+     "time_s": 0.002435
+    },
+    {
+     "op": "PandasGetItemOp(age)",
+     "count": 16,
+     "time_s": 0.0021
+    },
+    {
+     "op": "MethodCallOp(astype)",
+     "count": 3,
+     "time_s": 0.001906
+    },
+    {
+     "op": "MethodCallOp(groupby) [df]",
+     "count": 4,
+     "time_s": 0.001575
+    },
+    {
+     "op": "PandasGetItemOp(cutoff)",
+     "count": 10,
+     "time_s": 0.001086
+    },
+    {
+     "op": "PandasGetItemOp(comp_days_since)",
+     "count": 4,
+     "time_s": 0.000986
+    },
+    {
+     "op": "PandasGetItemOp(viol_days_since)",
+     "count": 4,
+     "time_s": 0.000905
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['bbl'])",
+     "count": 2,
+     "time_s": 0.0009
+    },
+    {
+     "op": "PandasGetItemOp(date)",
+     "count": 11,
+     "time_s": 0.00082
+    },
+    {
+     "op": "PandasGetItemOp(['bbl', 'date'])",
+     "count": 1,
+     "time_s": 0.00078
+    },
+    {
+     "op": "PandasGetItemOp(violC_days_since)",
+     "count": 4,
+     "time_s": 0.000657
+    },
+    {
+     "op": "MethodCallOp(to_frame)",
+     "count": 2,
+     "time_s": 0.000468
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['age'])",
+     "count": 4,
+     "time_s": 0.000464
+    },
+    {
+     "op": "PandasGetItemOp(cat)",
+     "count": 5,
+     "time_s": 0.000438
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['cat'])",
+     "count": 4,
+     "time_s": 0.000303
+    },
+    {
+     "op": "PandasGetItemOp(y)",
+     "count": 2,
+     "time_s": 0.000213
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['block'])",
+     "count": 2,
+     "time_s": 0.000205
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['lot'])",
+     "count": 2,
+     "time_s": 0.000204
+    },
+    {
+     "op": "GetAttrOp(str)",
+     "count": 6,
+     "time_s": 0.000186
+    },
+    {
+     "op": "MethodCallOp(reset_index)",
+     "count": 2,
+     "time_s": 0.000173
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['boroid'])",
+     "count": 1,
+     "time_s": 0.000157
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['inspectiondate'])",
+     "count": 1,
+     "time_s": 0.000139
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['received_date'])",
+     "count": 1,
+     "time_s": 9.4e-05
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['class'])",
+     "count": 1,
+     "time_s": 8.7e-05
+    },
+    {
+     "op": "BuildSplitter(CutoffSplit)",
+     "count": 1,
+     "time_s": 8e-05
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['borough'])",
+     "count": 1,
+     "time_s": 7.3e-05
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['major_category'])",
+     "count": 1,
+     "time_s": 6.9e-05
+    },
+    {
+     "op": "MethodCallOp(set_axis)",
+     "count": 1,
+     "time_s": 6.8e-05
+    },
+    {
+     "op": "ImplOp(<X>)",
+     "count": 1,
+     "time_s": 3.8e-05
+    },
+    {
+     "op": "SplitOutput(y) [df]",
+     "count": 4,
+     "time_s": 1.2e-05
+    },
+    {
+     "op": "GetAttrOp(index)",
+     "count": 1,
+     "time_s": 6e-06
+    },
+    {
+     "op": "SplitOutput(X) [df]",
+     "count": 4,
+     "time_s": 2e-06
+    }
+   ],
+   "pool": {
+    "hits": 635,
+    "misses": 0,
+    "hit_rate": 1.0,
+    "evictions": 0,
+    "serialize_s": 0.0,
+    "deserialize_s": 0.0,
+    "bytes_spilled": 0,
+    "bytes_loaded": 0
+   },
+   "scores": [
+    0.7238096092098489
+   ],
+   "best_score": 0.7238096092098489,
+   "cv": "CutoffSplit(expanding: 2020->2021, 2020+2021->2022)",
+   "cv_declared_on_plan": true,
+   "scoring": "average_precision",
+   "scoring_honoured": true,
+   "total_s": 86.2624,
+   "memory": {
+    "peak_mb": 2571.7,
+    "peak_at_s": 82.263,
+    "mean_mb": 1703.3,
+    "start_mb": 259.6,
+    "end_mb": 1991.4,
+    "n_samples": 856,
+    "interval_s": 0.1,
+    "duration_s": 86.194,
+    "curve": [
+     [
+      0.014,
+      259.6
+     ],
+     [
+      0.72,
+      265.4
+     ],
+     [
+      1.426,
+      283.2
+     ],
+     [
+      2.131,
+      295.1
+     ],
+     [
+      2.836,
+      304.4
+     ],
+     [
+      3.541,
+      327.3
+     ],
+     [
+      4.247,
+      399.7
+     ],
+     [
+      4.953,
+      634.7
+     ],
+     [
+      5.665,
+      946.4
+     ],
+     [
+      6.371,
+      1076.1
+     ],
+     [
+      7.077,
+      890.6
+     ],
+     [
+      7.782,
+      1223.9
+     ],
+     [
+      8.487,
+      959.6
+     ],
+     [
+      9.192,
+      1292.1
+     ],
+     [
+      9.896,
+      1098.4
+     ],
+     [
+      10.605,
+      956.0
+     ],
+     [
+      11.31,
+      1283.5
+     ],
+     [
+      12.014,
+      995.6
+     ],
+     [
+      12.719,
+      1153.0
+     ],
+     [
+      13.424,
+      1153.0
+     ],
+     [
+      14.129,
+      837.3
+     ],
+     [
+      14.834,
+      953.6
+     ],
+     [
+      15.544,
+      993.5
+     ],
+     [
+      16.249,
+      1372.8
+     ],
+     [
+      16.954,
+      1400.4
+     ],
+     [
+      17.659,
+      1429.2
+     ],
+     [
+      18.365,
+      1456.6
+     ],
+     [
+      19.069,
+      1409.7
+     ],
+     [
+      19.774,
+      1409.7
+     ],
+     [
+      20.484,
+      1693.9
+     ],
+     [
+      21.189,
+      1475.3
+     ],
+     [
+      21.893,
+      1745.2
+     ],
+     [
+      22.598,
+      1508.5
+     ],
+     [
+      23.304,
+      1667.0
+     ],
+     [
+      24.009,
+      1579.0
+     ],
+     [
+      24.714,
+      1508.4
+     ],
+     [
+      25.423,
+      1585.5
+     ],
+     [
+      26.128,
+      1586.1
+     ],
+     [
+      26.833,
+      1586.1
+     ],
+     [
+      27.537,
+      1586.1
+     ],
+     [
+      28.242,
+      1150.6
+     ],
+     [
+      28.947,
+      1243.3
+     ],
+     [
+      29.652,
+      1291.6
+     ],
+     [
+      30.361,
+      1688.6
+     ],
+     [
+      31.067,
+      1865.2
+     ],
+     [
+      31.772,
+      2053.4
+     ],
+     [
+      32.477,
+      2030.9
+     ],
+     [
+      33.182,
+      2015.0
+     ],
+     [
+      33.888,
+      2223.5
+     ],
+     [
+      34.593,
+      2439.8
+     ],
+     [
+      35.304,
+      2033.6
+     ],
+     [
+      36.009,
+      2173.0
+     ],
+     [
+      36.714,
+      2119.7
+     ],
+     [
+      37.418,
+      1964.8
+     ],
+     [
+      38.123,
+      2525.8
+     ],
+     [
+      38.827,
+      2178.1
+     ],
+     [
+      39.532,
+      2258.8
+     ],
+     [
+      40.237,
+      2160.7
+     ],
+     [
+      40.946,
+      1989.8
+     ],
+     [
+      41.65,
+      1418.5
+     ],
+     [
+      42.355,
+      1436.9
+     ],
+     [
+      43.06,
+      1474.5
+     ],
+     [
+      43.765,
+      1474.5
+     ],
+     [
+      44.47,
+      1659.7
+     ],
+     [
+      45.175,
+      1730.4
+     ],
+     [
+      45.885,
+      1730.4
+     ],
+     [
+      46.592,
+      1580.1
+     ],
+     [
+      47.297,
+      1905.0
+     ],
+     [
+      48.003,
+      2205.6
+     ],
+     [
+      48.707,
+      1717.2
+     ],
+     [
+      49.412,
+      1802.7
+     ],
+     [
+      50.117,
+      1816.8
+     ],
+     [
+      50.827,
+      1669.6
+     ],
+     [
+      51.532,
+      2182.9
+     ],
+     [
+      52.236,
+      1848.1
+     ],
+     [
+      52.941,
+      1928.6
+     ],
+     [
+      53.646,
+      1802.0
+     ],
+     [
+      54.35,
+      1613.0
+     ],
+     [
+      55.055,
+      1625.2
+     ],
+     [
+      55.765,
+      1645.9
+     ],
+     [
+      56.47,
+      1769.0
+     ],
+     [
+      57.174,
+      1944.9
+     ],
+     [
+      57.879,
+      1971.7
+     ],
+     [
+      58.584,
+      1999.7
+     ],
+     [
+      59.289,
+      2194.3
+     ],
+     [
+      59.994,
+      1922.4
+     ],
+     [
+      60.702,
+      1707.3
+     ],
+     [
+      61.407,
+      1791.9
+     ],
+     [
+      62.112,
+      2048.2
+     ],
+     [
+      62.816,
+      2043.4
+     ],
+     [
+      63.521,
+      2176.8
+     ],
+     [
+      64.226,
+      2228.5
+     ],
+     [
+      64.93,
+      2372.1
+     ],
+     [
+      65.64,
+      2077.3
+     ],
+     [
+      66.346,
+      2096.5
+     ],
+     [
+      67.051,
+      1837.4
+     ],
+     [
+      67.756,
+      1849.9
+     ],
+     [
+      68.461,
+      1850.3
+     ],
+     [
+      69.166,
+      1847.1
+     ],
+     [
+      69.871,
+      1862.9
+     ],
+     [
+      70.581,
+      1921.5
+     ],
+     [
+      71.286,
+      1982.8
+     ],
+     [
+      71.991,
+      2035.0
+     ],
+     [
+      72.696,
+      2003.0
+     ],
+     [
+      73.401,
+      2050.2
+     ],
+     [
+      74.105,
+      2328.1
+     ],
+     [
+      74.809,
+      2328.1
+     ],
+     [
+      75.513,
+      2328.1
+     ],
+     [
+      76.22,
+      2328.1
+     ],
+     [
+      76.924,
+      2328.1
+     ],
+     [
+      77.628,
+      2167.8
+     ],
+     [
+      78.333,
+      2531.8
+     ],
+     [
+      79.038,
+      2250.3
+     ],
+     [
+      79.742,
+      2185.1
+     ],
+     [
+      80.447,
+      2179.2
+     ],
+     [
+      81.156,
+      2138.2
+     ],
+     [
+      81.861,
+      2471.7
+     ],
+     [
+      82.565,
+      2236.7
+     ],
+     [
+      83.27,
+      2302.9
+     ],
+     [
+      83.975,
+      2374.9
+     ],
+     [
+      84.679,
+      2004.0
+     ],
+     [
+      85.384,
+      2007.5
+     ],
+     [
+      86.094,
+      2070.0
+     ],
+     [
+      86.194,
+      1991.4
+     ]
+    ],
+    "scored_from_s": 0.428,
+    "scored_to_s": 86.262
+   },
+   "mem_mode": "process",
+   "max_rss_mb": 2572.7,
+   "sample_rows": null,
+   "stats_enabled": true,
+   "eager_previews": false,
+   "elapsed_s": 89.816,
+   "code_sha1": "c625c4e671044c13",
+   "measured_at": "2026-09-28T14:24:32+00:00",
+   "path": "pipelines/pipeline_01.py",
+   "stratum_commit": "dfd9ca1d55bb71f4630249e9ccebe0d6317117ae"
+  }
+ }
+}
