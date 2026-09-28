@@ -42,7 +42,7 @@ url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "093722376b3e8ec80376143196cd727d374eff17" }
+stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "dfd9ca1d55bb71f4630249e9ccebe0d6317117ae" }
 torch = { index = "pytorch-cu126" }
 # The gcsfs 2026.8.1 release can deadlock closing a file (prefetcher close ->
 # "Calling sync() from within a running loop"); a data-lake pipeline then hangs
