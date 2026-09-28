@@ -321,6 +321,15 @@ def top_categories(ev, k):
     return early["cat"].value_counts().head(k).index.tolist()
 
 
+_PAD = "__pad__"   # never a real category; see table_block
+
+
+def _pad_to(cats, k):
+    """Pad a category list to length k with _PAD (one call: stratum lowers a
+    recorded list `+` to an elementwise numeric add)."""
+    return (list(cats) + [_PAD] * k)[:k]
+
+
 def event_features(X, ev, prefix, windows=(90, 365, 1095), cats=None, recency=True,
                    value=False):
     """Per (bbl, cutoff): event counts in the last w days before cutoff,
@@ -365,7 +374,10 @@ def event_features(X, ev, prefix, windows=(90, 365, 1095), cats=None, recency=Tr
     # X LEFT JOIN feats, COALESCE(counts, 0); days_since stays NULL
     zero = dict.fromkeys(set(aggs) - {name("days_since")}, 0)
     out = X.join(feats, on=["bbl", "cutoff"]).fillna(zero)
-    return out.rename(columns=rename) if rename else out
+    if not rename:
+        return out
+    pads = [f"{prefix}_{_PAD}_n{w}d" for w in (365, 1095)]   # table_block padding
+    return out.rename(columns=rename).drop(columns=pads, errors="ignore")
 
 
 def model_features(feats):
@@ -433,8 +445,10 @@ def table_block(feats, name, lake=None, k_cats=5, value=False, windows=(90, 365,
     """
     ev = load_union(name, lake) if isinstance(name, (list, tuple)) else load_events(name, lake)
     prefix = name if isinstance(name, str) else name[0].rsplit("_", 1)[0]
-    top = top_categories(ev, k_cats) if k_cats else None
-    cats = [top[i] for i in range(k_cats)] if k_cats else None
+    cats = None
+    if k_cats:   # pad to k (a table may have fewer categories); pads are dropped
+        top = top_categories(ev, k_cats).skb.apply_func(_pad_to, k_cats)
+        cats = [top[i] for i in range(k_cats)]
     return event_features(feats, ev, prefix, windows=windows, cats=cats, value=value)
 
 
