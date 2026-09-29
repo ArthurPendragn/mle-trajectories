@@ -1,0 +1,7 @@
+label = "APTOS 2019 blindness detection"
+task = "image classification, 5 ordinal grades"
+note = "Kaggle competition; fetch with get_data.sh."
+
+[metric]
+name = "quadratic weighted kappa"
+lower_is_better = false

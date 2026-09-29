@@ -1,0 +1,9 @@
+agent = "mlevolve"
+label = "mlevolve run 1"
+note = "Saw an anonymised task description (od_cost_regression: record_id, cost, origin_x/y)."
+
+[sources.skrubify_5_6_sol]
+default = true
+
+[sources.skrubify]
+note = "Single early conversion."

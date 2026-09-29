@@ -1,0 +1,12 @@
+agent = "mle-star"
+label = "MLE-STAR run 1"
+
+[sources.skrubify_openai]
+label = "OpenAI translation"
+default = true
+fold_identical_code = true
+
+[sources.skrubify_gemini]
+label = "Gemini translation"
+fold_identical_code = true
+note = "Partial: 7 of 68 steps."

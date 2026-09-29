@@ -1,0 +1,3 @@
+agent = "mle-claude"
+label = "Claude Code run 1 v2"
+note = "v2: systematic lake exploration with fine-grained DataOps (see pipelines/README.md)."

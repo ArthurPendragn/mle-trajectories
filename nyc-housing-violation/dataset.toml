@@ -1,0 +1,8 @@
+label = "NYC housing violation risk"
+task = "binary classification over a data lake (71 tables)"
+data = "gs://mle-nyc-lake/tasks/housing_violation_risk/v1/lake/full"
+note = "Pipelines read the lake from GCS; there is no local input/."
+
+[metric]
+name = "average_precision"
+lower_is_better = false

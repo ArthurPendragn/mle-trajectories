@@ -1,0 +1,7 @@
+label = "TrackTheTrackers"
+task = "multi-label ranking: predict up to 10 tracker ids per domain"
+note = "See DATA.md."
+
+[metric]
+name = "recall@10"
+lower_is_better = false

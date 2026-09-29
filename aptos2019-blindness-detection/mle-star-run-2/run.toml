@@ -1,0 +1,6 @@
+agent = "mle-star"
+label = "MLE-STAR run 2"
+note = "No final_state.json kept, so no lineage or scores. The run ended in agent error."
+
+[sources.skrubify_manual]
+note = "One hand-written rewrite."

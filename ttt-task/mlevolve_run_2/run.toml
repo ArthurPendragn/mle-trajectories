@@ -1,0 +1,12 @@
+agent = "mlevolve"
+label = "mlevolve run 2"
+
+[sources.skrubify_5_6_sol]
+note = "Experiment: one step."
+
+[sources.skrubify_iter]
+note = "Experiment: iterative conversion, 4 steps."
+
+[sources.skrubify_manual]
+dirs = ["skrubify_manual"]   # versions/ holds earlier drafts of the same file, not steps
+note = "Experiment: one hand-written rewrite."

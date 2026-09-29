@@ -1,0 +1,3 @@
+agent = "mle-claude"
+label = "Claude Code run 1"
+note = "Normalised copy of the original workspace (see README.md)."

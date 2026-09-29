@@ -42,7 +42,12 @@ tools/
     pipeline_analyzer/         lineage, operator DAGs, per-step diffs -> HTML report; runtime measurement
     trajectory.py              tabular overview of one run's final_state.json
     getcomp.sh                 one-off Kaggle download
+website/                       corpus explorer: Python registry/API + Next.js frontend (see website/README.md)
 ```
+
+Each dataset folder has a `dataset.toml` and each run folder a `run.toml`: the
+few facts the folders cannot say (agent, metric, main skrubify source, notes).
+`website/backend/registry.py` derives everything else and reports inconsistencies.
 
 `README.md` has the full corpus table, per-dataset notes and data sources.
 

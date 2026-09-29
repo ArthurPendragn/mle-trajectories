@@ -1,0 +1,7 @@
+label = "Tabular playground Dec 2021"
+task = "multiclass classification (forest cover type)"
+note = "Kaggle competition; fetch with get_data.sh."
+
+[metric]
+name = "accuracy"
+lower_is_better = false

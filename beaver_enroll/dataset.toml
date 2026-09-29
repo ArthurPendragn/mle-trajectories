@@ -1,0 +1,7 @@
+label = "BEAVER enrollment"
+task = "binary classification (high enrollment), data discovery"
+note = "BEAVER benchmark, not present on this machine (see DATA.md). The runs were never validated against real data (mle_star_flash_run_3/result.txt): trajectories, not working solutions."
+
+[metric]
+name = "f1"
+lower_is_better = false

@@ -1,0 +1,7 @@
+label = "Playground series S6E7"
+task = "classification"
+note = "Kaggle competition; fetch with get_data.sh."
+
+[metric]
+name = "balanced_accuracy"
+lower_is_better = false

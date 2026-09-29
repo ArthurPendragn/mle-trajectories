@@ -42,9 +42,16 @@ url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "dfd9ca1d55bb71f4630249e9ccebe0d6317117ae" }
+# stratum from the shadow-main branch; pinned by commit (uv fetches the rev from any branch)
+stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "bcadd8b42977706a72a0fd8d851c311fa7f83b0e" }
 torch = { index = "pytorch-cu126" }
 # The gcsfs 2026.8.1 release can deadlock closing a file (prefetcher close ->
 # "Calling sync() from within a running loop"); a data-lake pipeline then hangs
 # forever. Pin the commit with the fix -- the same one mle-claude uses.
 gcsfs = { git = "https://github.com/fsspec/gcsfs", rev = "9290d6f242eeb3e9d6b539f2f0beae017315f32a" }
+
+[dependency-groups]
+website = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+]

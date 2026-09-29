@@ -1,0 +1,7 @@
+label = "NYC taxi fare"
+task = "regression"
+note = "Kaggle competition; fetch with get_data.sh."
+
+[metric]
+name = "rmse"
+lower_is_better = true
