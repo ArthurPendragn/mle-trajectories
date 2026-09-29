@@ -1,0 +1,99 @@
+/* Operator explorer: pipeline picker + merged DAG canvas + node inspector.
+   Ported from tools/pipeline_analyzer/explorer.css, keyed on data-pa hooks. */
+.pa-explorer { display: grid; grid-template-columns: 300px 1fr; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .pa-explorer { grid-template-columns: 1fr; } }
+
+.pa-side { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.pa-side h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.pa-acts { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.pa-explorer button {
+  font: inherit; font-size: 12px; cursor: pointer; background: var(--badge); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 8px;
+}
+.pa-explorer button:hover { border-color: var(--accent); color: var(--accent); }
+[data-pa="filter"] {
+  width: 100%; font: inherit; font-size: 12px; padding: 3px 7px; margin-bottom: 8px;
+  background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px;
+}
+[data-pa="count"] { font-size: 12px; color: var(--muted); font-weight: 400; }
+
+[data-pa="list"] { max-height: 440px; overflow: auto; margin-top: 6px; border-top: 1px solid var(--border); }
+.pa-group {
+  display: flex; align-items: center; gap: 6px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--muted); margin: 10px 0 3px;
+}
+.pa-group button.mini { padding: 0 5px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+.pa-row {
+  display: grid; grid-template-columns: 16px 10px 1fr auto auto 26px 14px; gap: 6px;
+  align-items: center; padding: 2px; font-size: 12px; border-radius: 5px; cursor: pointer;
+}
+.pa-row:hover { background: var(--badge); }
+.pa-row input { margin: 0; cursor: pointer; }
+.pa-row .nm { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pa-row .sc { font-variant-numeric: tabular-nums; color: var(--muted); }
+.pa-row .dl { font-variant-numeric: tabular-nums; font-size: 11px; }
+.pa-row .dl.up { color: var(--up); }
+.pa-row .dl.down { color: var(--down); }
+.pa-row .dl.flat { color: var(--muted); }
+.pa-row .ops { font-size: 11px; color: var(--muted); text-align: right; }
+.pa-row .jump { opacity: 0; font-size: 11px; }
+.pa-row:hover .jump { opacity: 1; }
+.pa-row .err { color: var(--down); }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+
+.pa-main { min-width: 0; }
+.pa-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 12px; }
+.pa-tools select {
+  font: inherit; font-size: 12px; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px;
+}
+[data-pa="modehint"] { color: var(--warn); }
+[data-pa="stats"] { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+.pa-canvas {
+  background: var(--canvas); border: 1px solid var(--border); border-radius: 8px;
+  height: 620px; overflow: hidden; touch-action: none;
+}
+[data-pa="svg"] { width: 100%; height: 100%; display: block; cursor: grab; }
+[data-pa="svg"]:active { cursor: grabbing; }
+.pa-e { fill: none; stroke: #98a2b3; stroke-width: 1.2; }
+.pa-e.gone { stroke: #dc2626; stroke-dasharray: 4 3; opacity: .75; }
+.pa-n text { font: 11px Helvetica, Arial, sans-serif; fill: #1a1d24; text-anchor: middle; pointer-events: none; }
+.pa-n { cursor: pointer; }
+.pa-n:hover rect { stroke-width: 2.4; }
+.pa-n.hl rect { stroke: #111827; stroke-width: 2.6; }
+.pa-n.picked rect { stroke: #111827; stroke-width: 3; stroke-dasharray: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+.legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.sw { width: 14px; height: 10px; border: 1.5px solid; border-radius: 3px; display: inline-block; }
+
+/* Full screen: native Fullscreen API, or the same layout as a fixed overlay
+   (.pa-fs, set by the engine) where the API is unavailable. */
+.pa-explorer:fullscreen, .pa-explorer.pa-fs {
+  position: fixed; inset: 0; z-index: 60; margin: 0; padding: 12px; height: 100vh;
+  max-height: 100vh; overflow: hidden; background: var(--bg); align-items: stretch;
+}
+.pa-explorer:fullscreen .pa-side, .pa-explorer.pa-fs .pa-side { overflow: auto; }
+.pa-explorer:fullscreen [data-pa="list"], .pa-explorer.pa-fs [data-pa="list"] { max-height: none; }
+.pa-explorer:fullscreen .pa-main, .pa-explorer.pa-fs .pa-main { display: flex; flex-direction: column; min-height: 0; }
+.pa-explorer:fullscreen .pa-canvas, .pa-explorer.pa-fs .pa-canvas { flex: 1 1 auto; min-height: 0; height: auto; }
+.pa-explorer:fullscreen [data-pa="inspect"], .pa-explorer.pa-fs [data-pa="inspect"] {
+  flex: none; max-height: 30vh; overflow: auto;
+}
+
+[data-pa="inspect"] {
+  margin-top: 10px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px;
+}
+[data-pa="inspect"] p { margin: 4px 0; }
+.pa-inspect-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pa-inspect-head code { font-family: var(--mono); font-size: 12px; }
+.pill { background: var(--badge); color: var(--muted); border-radius: 9px; padding: 0 7px; font-size: 11px; }
+.pa-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.pa-chip {
+  display: inline-flex; align-items: center; gap: 5px; background: var(--badge);
+  border: 1px solid var(--border); border-radius: 20px; padding: 1px 9px 1px 6px; font-size: 12px;
+}
+.pa-chip.on { border-color: var(--accent); }
+.pa-chip input { margin: 0; cursor: pointer; }
+.pa-chip a { font-family: var(--mono); font-size: 11px; }
