@@ -1,12 +1,13 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
-import { getAnalysis, getRun, getRuntimeProfile, getTree } from "@/lib/dal";
+import { getActions, getAnalysis, getRun, getRuntimeProfile, getTree } from "@/lib/dal";
 import { capabilities, noPlansReason } from "@/lib/capabilities";
 import { firstLine, fmtScore, improvement, metricLabel } from "@/lib/format";
 import type { RunDetail, Source } from "@/lib/types";
 import { RunAnalysis } from "@/components/run-analysis";
 import { RuntimeProfile } from "@/components/runtime-profile";
+import { RuntimeSweep } from "@/components/runtime-sweep";
 import { SelectionBar } from "@/components/selection-bar";
 import { StaleHint } from "@/components/stale-hint";
 
@@ -83,13 +84,15 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
 
   // the operator analysis is started here (idempotent) so it is building by the
   // time the page is on screen; the tree and runtime profile need no build
-  const [tree, analysis, profile] = await Promise.all([
+  const [tree, analysis, profile, actionsInfo] = await Promise.all([
     getTree(dataset, name, src ?? undefined),
     src && !noPlans ? getAnalysis(dataset, name, src, { start: true }) : Promise.resolve(null),
     rtName ? getRuntimeProfile(dataset, name, rtName) : Promise.resolve(null),
+    getActions(dataset, name),
   ]);
   const store = run.runtime.find((r) => r.name === rtName) ?? null;
   const actions = capabilities(run);
+  const sweep = actions.find((a) => a.key === "sweep");
 
   return (
     <>
@@ -111,10 +114,9 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
           {ds.data_status}{ds.samples.length > 0 && ` · samples: ${ds.samples.join(", ")}`}</div>
         <div><span className="muted">actions</span>
           <span>
-            {actions.map((a) => (
-              <button key={a.key} className="action" disabled
-                      title={a.ok ? "coming next" : a.reason}>{a.label}</button>
-            ))}
+            {actions.map((a) => a.ok
+              ? <a key={a.key} className="action" href={`#action-${a.key}`}>{a.label}</a>
+              : <button key={a.key} className="action" disabled title={a.reason}>{a.label}</button>)}
           </span>
         </div>
       </div>
@@ -126,7 +128,15 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
       <RunAnalysis dataset={dataset} run={name} source={noPlans ? null : src}
                    noSourceReason={noPlans ?? ""} tree={tree} initial={analysis} />
 
-      <section>
+      <section id="action-sweep">
+        <h2>Actions</h2>
+        {!sweep?.ok || !actionsInfo
+          ? <p className="muted">Runtime sweep unavailable: {sweep?.reason ?? "unknown run"}.</p>
+          : <RuntimeSweep dataset={dataset} run={name} initial={actionsInfo} selectedSource={src}
+                          stores={run.runtime.map((r) => r.name)} />}
+      </section>
+
+      <section id="runtime-profile">
         <h2>Runtime profile</h2>
         {!profile || !store
           ? <p className="muted">No runtime measurements for this run yet.</p>
@@ -150,7 +160,7 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
           <table>
             <thead>
               <tr><th>Store</th><th>Source</th><th className="num">OK</th>
-                <th className="num">Failed</th><th>Sample</th><th /></tr>
+                <th className="num">Failed</th><th>Data</th><th /></tr>
             </thead>
             <tbody>
               {run.runtime.map((r) => (
@@ -161,7 +171,10 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
                   <td>{r.source ?? <span className="muted">?</span>}</td>
                   <td className="num">{r.n_ok}</td>
                   <td className="num">{r.n_failed || ""}</td>
-                  <td>{r.sample_rows ? `${r.sample_rows.toLocaleString()} rows` : "full data"}</td>
+                  <td>
+                    {r.data === "input" ? (r.sample_rows ? "input/" : "full data") : `${r.data}/`}
+                    {r.sample_rows ? `, ${r.sample_rows.toLocaleString()} rows` : ""}
+                  </td>
                   <td><StaleHint store={r} current={run.stratum_commit} compact /></td>
                 </tr>
               ))}

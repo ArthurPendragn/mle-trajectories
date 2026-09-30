@@ -390,7 +390,9 @@ def main(argv=None) -> int:
 
     store["version"] = STORE_VERSION
     mem_dir = None if args.no_mem_csv else store_path.with_suffix(".mem")
-    store["meta"].update(
+    # replaced, not merged: a key an earlier version of this tool wrote would
+    # otherwise stay in the store and describe a sweep that never happened
+    store["meta"] = dict(
         pipelines=[str(d) for d in pipe_dirs], run_in=str(run_in),
         sample_rows=args.sample_rows, stats_enabled=not args.no_stats,
         cv_from_plan="stratum grid_search resolves mark_as_X(cv=...)",

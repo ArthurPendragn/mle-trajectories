@@ -15,9 +15,9 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import Body, FastAPI, HTTPException, Response
 
-from . import jobs
+from . import actions, jobs
 from .registry import (REPO_ROOT, Dataset, Metric, Run, RuntimeStore, Source, StepInfo,
                        current_stratum_commit, load_corpus)
 from .runtime_profile import build_profile
@@ -49,7 +49,7 @@ def _source(run: Run, s: Source) -> dict:
 
 def _runtime(r: RuntimeStore) -> dict:
     return {"name": r.name, "file": r.path.name, "source": r.source,
-            "sample_rows": r.sample_rows, "label": r.label, "note": r.note,
+            "sample_rows": r.sample_rows, "data": r.data, "label": r.label, "note": r.note,
             "hidden": r.hidden, "measured_at": r.measured_at,
             "n_ok": r.n_ok, "n_failed": r.n_failed, "n_code_changed": r.n_code_changed,
             "n_old_build": r.n_old_build, "commits": r.commits}
@@ -190,3 +190,56 @@ def run_analysis(dataset: str, run: str, source: str, start: bool = False,
         return Response(body, media_type="application/json")
     return Response(json.dumps({k: v for k, v in st.items() if k != "path"}),
                     media_type="application/json")
+
+
+# --------------------------------------------------------------------------- #
+# actions: the frontend sends parameters, actions.py builds and validates the
+# command from the registry run
+# --------------------------------------------------------------------------- #
+def _action(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except actions.ActionError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/runs/{dataset}/{run}/actions")
+def run_actions(dataset: str, run: str) -> dict:
+    r = _find_run(dataset, run)
+    return {
+        "sweep": {
+            "sources": [{"name": s.name, "label": s.label, "coverage": list(r.coverage(s)),
+                         "default": s is r.default_source()}
+                        for s in r.sources if s.skrub and s.files and not s.hidden],
+            "data": actions.data_options(r),
+        },
+        "jobs": actions.jobs_for(r),
+        # a sweep anywhere on the node blocks starting another one
+        "busy": next(({"id": j["id"], "run": j["run"], "label": j["label"]}
+                      for j in actions.running("runtime-sweep")), None),
+    }
+
+
+@app.post("/api/runs/{dataset}/{run}/actions/runtime-sweep/plan")
+def sweep_plan(dataset: str, run: str, params: dict = Body(...), listing: bool = False) -> dict:
+    return _action(actions.plan_sweep, _find_run(dataset, run), params, listing=listing)
+
+
+@app.post("/api/runs/{dataset}/{run}/actions/runtime-sweep")
+def sweep_start(dataset: str, run: str, params: dict = Body(...)) -> dict:
+    return _action(actions.start_sweep, _find_run(dataset, run), params)
+
+
+@app.get("/api/jobs")
+def jobs_list() -> dict:
+    return {"jobs": actions.jobs_for(limit=20)}
+
+
+@app.get("/api/jobs/{job_id}")
+def job(job_id: str) -> dict:
+    return _action(actions.job_status, job_id, log_lines=60)
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def job_stop(job_id: str) -> dict:
+    return _action(actions.stop, job_id)

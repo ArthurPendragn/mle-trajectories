@@ -5,6 +5,10 @@ label = "MLE-STAR run 1"
 label = "OpenAI translation"
 default = true
 fold_identical_code = true
+note = """train9_improve0 scores with an estimator-style scorer f(estimator, X, y). \
+skrub runs it; stratum cannot (it scores from the plan's predictions and has no \
+estimator): since c2de0f8e it fails, before that stratum silently used mean \
+squared error, so older runtime stores hold an MSE for it (stratum#200)."""
 
 [sources.skrubify_gemini]
 label = "Gemini translation"

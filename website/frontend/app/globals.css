@@ -138,10 +138,12 @@ h3 { font-size: 13px; font-weight: 600; margin: 16px 0 6px; }
   font: inherit; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg); color: var(--fg);
 }
-button.action {
+button.action, a.action {
   font: inherit; font-size: 12px; padding: 1px 8px; border: 1px solid var(--border);
   border-radius: 6px; background: var(--badge); color: var(--muted);
 }
+a.action { color: var(--accent); }
+a.action:hover { border-color: var(--accent); text-decoration: none; }
 details.block { margin: 12px 0; }
 details.block > summary { cursor: pointer; color: var(--muted); margin-bottom: 6px; }
 .tree-modes { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; font-size: 12px; color: var(--muted); margin: 0 0 8px; }
@@ -170,3 +172,34 @@ pre.log {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 tr:target td { background: var(--best); }
+
+/* actions: runtime sweep form and jobs */
+.sweep { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; }
+.sweep p { margin: 6px 0; }
+.sweep-form { display: flex; flex-wrap: wrap; gap: 10px 22px; align-items: flex-end; }
+.sweep-form label { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.sweep-form label .muted { font-size: 12px; }
+.sweep-form label.check { flex-direction: row; align-items: center; gap: 5px; cursor: pointer; }
+.sweep-cap { display: inline-flex; gap: 6px; align-items: center; }
+.sweep-form select, .sweep-form input:not([type=checkbox]) {
+  font: inherit; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg);
+}
+.sweep-form input[inputmode=numeric] { width: 7em; }
+.sweep-buttons { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+.sweep button, .job button {
+  font: inherit; font-size: 12px; cursor: pointer; background: var(--badge); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 10px;
+}
+.sweep button:disabled { cursor: default; opacity: 0.6; }
+.sweep button.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.job { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; margin-top: 8px; }
+.job-head { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+.job-links { margin-left: auto; display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.job-progress { display: flex; gap: 10px; align-items: center; margin-top: 6px; }
+.job-progress progress { width: 180px; }
+.job details.block { margin: 6px 0 0; }
+.badge.state-running, .badge.state-starting { color: var(--accent); }
+.badge.state-done { color: var(--up); }
+.badge.state-failed, .badge.state-lost { color: var(--down); }
+.badge .spinner { width: 8px; height: 8px; border-width: 1.5px; }

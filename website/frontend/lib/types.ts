@@ -19,6 +19,7 @@ export type RuntimeStore = {
   file: string;
   source: string | null;
   sample_rows: number | null;
+  data: string;                 // "input" or the sample folder it ran on
   n_ok: number;
   n_failed: number;
   n_code_changed: number;
@@ -158,3 +159,55 @@ export type AnalysisStatus =
   | { status: "ready"; data: AnalysisData }
   | { status: "running" | "queued" | "missing"; log?: string }
   | { status: "failed"; log: string };
+
+// --- actions -------------------------------------------------------------- //
+export type SweepParams = {
+  source: string;
+  data: string;
+  sample_rows: number | null;
+  timeout_s: number;
+  retry_failed: boolean;
+  force: boolean;
+};
+
+export type DataOption = { name: string; label: string; ok: boolean; note: string | null };
+
+export type SweepPlan = {
+  params: SweepParams;
+  store: string;
+  store_exists: boolean;
+  store_summary: { n_ok: number; n_failed: number; n_stale: number } | null;
+  n_pipelines: number;
+  command: string;
+  listing?: { ok: boolean; text: string; would_run: number | null; total: number | null };
+};
+
+export type JobState = "starting" | "running" | "done" | "failed" | "stopped" | "lost";
+
+export type Job = {
+  id: string;
+  action: string;
+  run: string;
+  label: string;
+  params: SweepParams;
+  command: string;
+  outputs: { runtime?: string };
+  started_at: string;
+  finished_at: string | null;
+  returncode: number | null;
+  state: JobState;
+  progress: {
+    total: number | null; todo: number | null; cached: number | null;
+    done: number; failed: number; current: string | null; finished: boolean;
+  };
+  log: string;
+};
+
+export type ActionsInfo = {
+  sweep: {
+    sources: { name: string; label: string | null; coverage: [number, number]; default: boolean }[];
+    data: DataOption[];
+  };
+  jobs: Job[];
+  busy: { id: string; run: string; label: string } | null;   // a sweep running anywhere
+};

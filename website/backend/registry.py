@@ -110,6 +110,7 @@ class RuntimeStore:
     path: Path
     source: str | None                 # name of the Source it measured
     sample_rows: int | None
+    data: str = "input"                # data folder it ran on: "input" or a sample folder
     n_ok: int = 0
     n_failed: int = 0
     n_code_changed: int = 0            # ok, but the pipeline file changed since
@@ -128,6 +129,10 @@ class RuntimeStore:
     @property
     def n_stale(self) -> int:
         return self.n_code_changed + self.n_old_build
+
+    @property
+    def full_data(self) -> bool:
+        return self.data == "input" and self.sample_rows is None
 
 
 @dataclass
@@ -240,10 +245,10 @@ class Run:
         same = [r for r in visible if source and r.source == source.name] or visible
         kind = self.dataset.defaults.get("runtime")
         if kind in ("full", "sample"):
-            match = [r for r in same if (r.sample_rows is None) == (kind == "full")]
+            match = [r for r in same if r.full_data == (kind == "full")]
             if match:
                 return max(match, key=lambda r: (r.n_ok, r.measured_at or "")), "dataset.toml"
-        best = max(same, key=lambda r: (r.sample_rows is None, r.n_ok, r.measured_at or ""))
+        best = max(same, key=lambda r: (r.full_data, r.n_ok, r.measured_at or ""))
         return best, "full data preferred, then most pipelines measured"
 
     def coverage(self, source: Source) -> tuple[int, int]:
@@ -376,8 +381,12 @@ def _load_runtime(run: Run, commit: str | None, annotations: dict) -> None:
                 break
         if source is None:
             run.warnings.append(f"{path.name}: cannot tell which pipeline folder it measured")
+        # which data: the run-in folder is the dataset's own (input/) or one of
+        # its sample folders; anything else (an old scratch dir) counts as input/
+        run_in = Path(meta.get("run_in") or "").name
+        data = run_in if run_in in run.dataset.samples else "input"
         rs = RuntimeStore(path=path, source=source.name if source else None,
-                          sample_rows=meta.get("sample_rows"))
+                          sample_rows=meta.get("sample_rows"), data=data)
         # older stores stamp the build only once, in meta, not per entry
         store_commit = (meta.get("versions") or {}).get("stratum_commit")
         commits, stamps = set(), []
@@ -595,7 +604,7 @@ def _print_run(run: Run) -> None:
             print(f"      {s.note}")
     for r in run.runtime:
         print(f"  runtime {r.path.name}: source {r.source or '?'}, {r.n_ok} ok, "
-              f"{r.n_failed} failed, {r.n_stale} stale, sample_rows={r.sample_rows}")
+              f"{r.n_failed} failed, {r.n_stale} stale, data={r.data}, sample_rows={r.sample_rows}")
     print(f"  data: {run.dataset.data_status()}"
           + (f", samples {', '.join(run.dataset.samples)}" if run.dataset.samples else ""))
     for w in run.dataset.warnings + run.warnings:

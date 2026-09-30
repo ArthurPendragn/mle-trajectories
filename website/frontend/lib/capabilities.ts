@@ -22,7 +22,7 @@ export function capabilities(run: RunDetail): Capability[] {
   const data = run.dataset_info.data_status !== "missing" || run.dataset_info.samples.length > 0;
   return [
     {
-      key: "sweep", label: "Runtime sweep", kind: "action", ok: plans && data, planned: true,
+      key: "sweep", label: "Runtime sweep", kind: "action", ok: plans && data,
       reason: !plans ? "needs skrub DataOps plans"
         : !data ? "needs the dataset's input/ (or a sample) on this machine" : undefined,
     },

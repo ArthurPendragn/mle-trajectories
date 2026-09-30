@@ -7,7 +7,8 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { SESSION_COOKIE, decrypt } from "./session";
-import type { AnalysisStatus, Corpus, RunDetail, RuntimeProfile, TreeData } from "./types";
+import type { ActionsInfo, AnalysisStatus, Corpus, Job, RunDetail, RuntimeProfile, SweepParams,
+  SweepPlan, TreeData } from "./types";
 
 // Data access layer: the only place that talks to the Python API, and every
 // call re-checks the session (proxy.ts is only the optimistic first gate).
@@ -32,19 +33,29 @@ export class ApiError extends Error {
   }
 }
 
-function apiGet<T>(route: string): Promise<T> {
+function apiRequest<T>(method: "GET" | "POST", route: string, body?: unknown): Promise<T> {
+  const payload = body === undefined ? undefined : JSON.stringify(body);
   return new Promise((resolve, reject) => {
-    const req = request({ socketPath: socketPath(), path: route, method: "GET" }, (res) => {
-      let body = "";
+    const req = request({
+      socketPath: socketPath(), path: route, method,
+      headers: payload === undefined ? {} : {
+        "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload),
+      },
+    }, (res) => {
+      let text = "";
       res.setEncoding("utf8");
-      res.on("data", (chunk) => (body += chunk));
+      res.on("data", (chunk) => (text += chunk));
       res.on("end", () => {
         if (res.statusCode !== 200) {
-          reject(new ApiError(res.statusCode ?? 500, body));
+          let detail = text;
+          try {
+            detail = JSON.parse(text).detail ?? text;
+          } catch { /* not JSON */ }
+          reject(new ApiError(res.statusCode ?? 500, String(detail)));
           return;
         }
         try {
-          resolve(JSON.parse(body) as T);
+          resolve(JSON.parse(text) as T);
         } catch (err) {
           reject(err);
         }
@@ -52,9 +63,11 @@ function apiGet<T>(route: string): Promise<T> {
     });
     req.on("error", (err) =>
       reject(new ApiError(503, `backend unreachable at ${socketPath()}: ${err.message}`)));
-    req.end();
+    req.end(payload);
   });
 }
+
+const apiGet = <T,>(route: string) => apiRequest<T>("GET", route);
 
 export async function getCorpus(): Promise<Corpus> {
   await verifySession();
@@ -108,4 +121,30 @@ export async function getAnalysis(dataset: string, run: string, source: string,
   await verifySession();
   return orNull(apiGet<AnalysisStatus>(
     `${runPath(dataset, run)}/analysis/${encodeURIComponent(source)}${query(opts)}`));
+}
+
+// --- actions -------------------------------------------------------------- //
+// Mutations go through server actions (app/actions/), which get Next's Origin
+// check; the API validates every parameter and builds the command itself.
+
+export async function getActions(dataset: string, run: string): Promise<ActionsInfo | null> {
+  await verifySession();
+  return orNull(apiGet<ActionsInfo>(`${runPath(dataset, run)}/actions`));
+}
+
+export async function planSweep(dataset: string, run: string, params: SweepParams,
+                                listing = false): Promise<SweepPlan> {
+  await verifySession();
+  return apiRequest<SweepPlan>("POST",
+    `${runPath(dataset, run)}/actions/runtime-sweep/plan${query({ listing })}`, params);
+}
+
+export async function startSweep(dataset: string, run: string, params: SweepParams): Promise<Job> {
+  await verifySession();
+  return apiRequest<Job>("POST", `${runPath(dataset, run)}/actions/runtime-sweep`, params);
+}
+
+export async function stopJob(id: string): Promise<Job> {
+  await verifySession();
+  return apiRequest<Job>("POST", `/api/jobs/${encodeURIComponent(id)}/stop`);
 }
