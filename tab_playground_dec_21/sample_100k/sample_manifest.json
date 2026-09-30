@@ -1,0 +1,68 @@
+{
+  "dataset": "tab_playground_dec_21",
+  "name": "sample_100k",
+  "size": 100000,
+  "built": "2026-09-30T21:07:47+02:00",
+  "built_by": "tools/dataset_sample",
+  "recipe": {
+    "target": "Cover_Type",
+    "min_per_class": 5,
+    "seed": 0,
+    "tables": {
+      "train.csv": "sample",
+      "test.csv": "keep",
+      "sample_submission.csv": "keep"
+    }
+  },
+  "recipe_sha1": "e975e99905ff15d7",
+  "seed": 0,
+  "source": "input",
+  "rows": {
+    "sample_submission.csv": {
+      "rule": "keep",
+      "src": 1000000,
+      "out": 1000000
+    },
+    "test.csv": {
+      "rule": "keep",
+      "src": 1000000,
+      "out": 1000000
+    },
+    "train.csv": {
+      "rule": "sample",
+      "src": 4000000,
+      "out": 100001
+    }
+  },
+  "class_counts": {
+    "train.csv": {
+      "target": "Cover_Type",
+      "src": {
+        "1": 1468136,
+        "2": 2262087,
+        "3": 195712,
+        "4": 377,
+        "5": 1,
+        "6": 11426,
+        "7": 62261
+      },
+      "out": {
+        "1": 36703,
+        "2": 56552,
+        "3": 4893,
+        "4": 9,
+        "5": 1,
+        "6": 286,
+        "7": 1557
+      }
+    }
+  },
+  "checks": [
+    "same 3 file(s) as input/",
+    "same columns (and parquet schemas) per table",
+    "no table emptied",
+    "train.csv: all 7 classes of Cover_Type present"
+  ],
+  "elapsed_s": 12.1,
+  "fingerprint": "4f0f11f70fc9518b"
+}
