@@ -10,7 +10,8 @@ export function StaleHint({ store, current, compact = false }: {
 }) {
   const oldBuild = store.n_old_build > 0;
   const changed = store.n_code_changed > 0;
-  if (!oldBuild && !changed) return null;
+  const rebuilt = store.n_data_changed > 0;
+  if (!oldBuild && !changed && !rebuilt) return null;
   const known = store.commits.filter((c) => c !== "unknown").map(shortCommit);
   const built = known.length > 0 ? `stratum ${known.join(", ")}`
     : "a stratum build that was not recorded";
@@ -19,9 +20,10 @@ export function StaleHint({ store, current, compact = false }: {
     parts.push(`${store.n_old_build} measured under ${built}, installed is ${shortCommit(current)}`);
   }
   if (changed) parts.push(`${store.n_code_changed} pipeline file(s) changed since measuring`);
-  const text = `${parts.join("; ")}. Re-measure for numbers comparable with the current build.`;
+  if (rebuilt) parts.push(`${store.n_data_changed} measured on an earlier build of ${store.data}`);
+  const text = `${parts.join("; ")}. Re-measure for numbers comparable with the current build and data.`;
   if (compact) {
-    return <span className="hint" title={text}>ⓘ older build</span>;
+    return <span className="hint" title={text}>ⓘ {oldBuild || changed ? "older build" : "sample rebuilt"}</span>;
   }
   return <p className="hint">ⓘ {text}</p>;
 }

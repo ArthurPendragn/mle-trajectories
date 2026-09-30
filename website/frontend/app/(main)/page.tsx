@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { getCorpus } from "@/lib/dal";
-import { fmtScore, metricLabel, shortCommit } from "@/lib/format";
+import { dataLabel, fmtScore, metricLabel, shortCommit } from "@/lib/format";
 import type { DatasetInfo, RunSummary } from "@/lib/types";
 import { StaleHint } from "@/components/stale-hint";
 
@@ -38,7 +38,7 @@ function Runtime({ run, current }: { run: RunSummary; current: string | null }) 
       {run.runtime.map((r) => (
         <span key={r.file}>
           {r.n_ok} ok{r.n_failed > 0 && <span className="muted"> · {r.n_failed} failed</span>}
-          {r.sample_rows && <span className="muted"> @{r.sample_rows.toLocaleString()} rows</span>}{" "}
+          {r.data !== "input" || r.legacy_rows ? <span className="muted"> @{dataLabel(r)}</span> : null}{" "}
           <StaleHint store={r} current={current} compact />
         </span>
       ))}

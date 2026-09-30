@@ -3,11 +3,11 @@ import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { getActions, getAnalysis, getRun, getRuntimeProfile, getTree } from "@/lib/dal";
 import { capabilities, noPlansReason } from "@/lib/capabilities";
-import { firstLine, fmtScore, improvement, metricLabel } from "@/lib/format";
+import { dataLabel, firstLine, fmtScore, improvement, metricLabel } from "@/lib/format";
 import type { RunDetail, Source } from "@/lib/types";
 import { RunAnalysis } from "@/components/run-analysis";
 import { RuntimeProfile } from "@/components/runtime-profile";
-import { RuntimeSweep } from "@/components/runtime-sweep";
+import { ActionsPanel } from "@/components/actions/panel";
 import { SelectionBar } from "@/components/selection-bar";
 import { StaleHint } from "@/components/stale-hint";
 
@@ -115,7 +115,7 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
         <div><span className="muted">actions</span>
           <span>
             {actions.map((a) => a.ok
-              ? <a key={a.key} className="action" href={`#action-${a.key}`}>{a.label}</a>
+              ? <a key={a.key} className="action" href="#actions">{a.label}</a>
               : <button key={a.key} className="action" disabled title={a.reason}>{a.label}</button>)}
           </span>
         </div>
@@ -128,12 +128,12 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
       <RunAnalysis dataset={dataset} run={name} source={noPlans ? null : src}
                    noSourceReason={noPlans ?? ""} tree={tree} initial={analysis} />
 
-      <section id="action-sweep">
+      <section id="actions">
         <h2>Actions</h2>
-        {!sweep?.ok || !actionsInfo
-          ? <p className="muted">Runtime sweep unavailable: {sweep?.reason ?? "unknown run"}.</p>
-          : <RuntimeSweep dataset={dataset} run={name} initial={actionsInfo} selectedSource={src}
-                          stores={run.runtime.map((r) => r.name)} />}
+        {!actionsInfo ? <p className="muted">Unavailable.</p>
+          : <ActionsPanel dataset={dataset} run={name} initial={actionsInfo} selectedSource={src}
+                          stores={run.runtime.map((r) => r.name)}
+                          sweepReason={sweep?.ok ? null : sweep?.reason ?? "unknown run"} />}
       </section>
 
       <section id="runtime-profile">
@@ -172,8 +172,7 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
                   <td className="num">{r.n_ok}</td>
                   <td className="num">{r.n_failed || ""}</td>
                   <td>
-                    {r.data === "input" ? (r.sample_rows ? "input/" : "full data") : `${r.data}/`}
-                    {r.sample_rows ? `, ${r.sample_rows.toLocaleString()} rows` : ""}
+                    {dataLabel(r)}
                   </td>
                   <td><StaleHint store={r} current={run.stratum_commit} compact /></td>
                 </tr>

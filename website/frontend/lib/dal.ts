@@ -7,8 +7,8 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { SESSION_COOKIE, decrypt } from "./session";
-import type { ActionsInfo, AnalysisStatus, Corpus, Job, RunDetail, RuntimeProfile, SweepParams,
-  SweepPlan, TreeData } from "./types";
+import type { ActionsInfo, AnalysisStatus, Corpus, Job, RunDetail, RuntimeProfile, SampleParams,
+  SamplePlan, SweepParams, SweepPlan, TreeData } from "./types";
 
 // Data access layer: the only place that talks to the Python API, and every
 // call re-checks the session (proxy.ts is only the optimistic first gate).
@@ -142,6 +142,17 @@ export async function planSweep(dataset: string, run: string, params: SweepParam
 export async function startSweep(dataset: string, run: string, params: SweepParams): Promise<Job> {
   await verifySession();
   return apiRequest<Job>("POST", `${runPath(dataset, run)}/actions/runtime-sweep`, params);
+}
+
+export async function planSample(dataset: string, run: string,
+                                 params: SampleParams): Promise<SamplePlan> {
+  await verifySession();
+  return apiRequest<SamplePlan>("POST", `${runPath(dataset, run)}/actions/build-sample/plan`, params);
+}
+
+export async function startSample(dataset: string, run: string, params: SampleParams): Promise<Job> {
+  await verifySession();
+  return apiRequest<Job>("POST", `${runPath(dataset, run)}/actions/build-sample`, params);
 }
 
 export async function stopJob(id: string): Promise<Job> {

@@ -16,8 +16,8 @@ website/
         runtime_profile.py  per-pipeline and per-operator time, from a runtime store
         worker.py       operator analysis of one run+source, in its own process
         jobs.py         starts workers, caches their results in website/.cache/
-        actions.py      long-running actions (runtime sweep): builds the command,
-                        runs it detached, tracks it in website/.cache/actions/
+        actions.py      long-running actions (build sample, runtime sweep): builds
+                        the command, runs it detached, tracks it in website/.cache/actions/
         __main__.py     serves the API on a private unix socket
     frontend/           Next.js (App Router, TypeScript), plain CSS
         proxy.ts        optimistic login gate
@@ -25,6 +25,7 @@ website/
         lib/capabilities.ts   what each action needs, and why it is unavailable
         components/explorer/  the operator explorer (engine.js ported from
                         tools/pipeline_analyzer/explorer.js)
+        components/actions/   the actions panel: sample and sweep forms, job cards
         components/     search tree + analyses, runtime profile, source pickers
         app/(main)/     corpus page, run page
         app/login/      login form
@@ -193,33 +194,41 @@ rather than drawing a cycle, and was property-tested on the cached analyses:
 2242 random selections, diff pairs and expand states, with no cycle, no mixed
 pipeline set and no disconnected group.
 
-## Actions: runtime sweep
+## Actions
 
-The run page's **Actions** section runs `pipeline_analyzer.runtime` over one
-skrub source. You choose:
+The run page's **Actions** section starts long-running jobs. Each job runs
+detached (it survives an API reload) with its state in
+`website/.cache/actions/<id>/` (spec, log, pid, exit); the page polls it, shows
+progress and log, and re-renders when it ends. **stop** takes down the whole
+process tree. The frontend sends parameters only; `backend/actions.py` builds
+and validates every command from the registry.
 
-- **data**: the dataset's full `input/`, or any sample folder. A dataset folder
-  is recognised as data when it holds `input/`, and every other sub-folder with
-  its own `input/` is a sample (`sample/`, `sample_200k/`, …; run with it as
-  `--run-in`). A `sample_manifest.json` from `make_sample.py` adds row counts to
-  the option.
-- **row cap**: `--sample-rows N` caps every `pandas.read_csv` at N rows, on
-  either kind of data folder. Parquet and other readers are not capped.
-- the timeout per pipeline, retry failed, re-measure all.
+### Build sample
 
-The sweep writes the store that already holds this source at this data size
-(data folder + row cap), which the tool treats as a cache: fresh entries are
-kept, missing and stale ones (other code, other stratum build) re-measured.
-Otherwise it creates `runtime_stats_<source>[_<sample>][_<N>rows|_fulldata].json`.
-"check what would run" shows the tool's own `--list` (~12 s, because it imports
-stratum for the build). Starting takes two clicks.
+Builds `<dataset>/sample_<size>/` with `tools/dataset_sample`, from the
+`[sample]` recipe in `dataset.toml` (see `tools/dataset_sample/README.md`):
+same file names as `input/`, fewer rows, joins and classes kept intact, a
+`sample_manifest.json` beside it. It is built in a hidden folder and moved into
+place only after its checks pass; "rebuild" replaces an existing one. Greyed
+out, with the reason, where the dataset has no recipe or no local `input/`.
+One build per dataset at a time, and never over a sample a sweep is reading.
 
-The job runs detached (it survives an API reload) with its state in
-`website/.cache/actions/<id>/` (spec, log, pid, exit). The page polls it and
-shows its progress and log. **stop** takes down the whole process tree; whatever
-was measured so far stays in the store. Only one sweep runs at a time on the
-node, because two side by side would slow each other down and skew the timings.
-When a sweep ends, its store shows up in the runtime-store picker.
+Recognised data folders: `<dataset>/input/` is the full data, and every other
+non-hidden sub-folder with its own `input/` is a sample (usable as `--run-in`).
+
+### Runtime sweep
+
+Runs `pipeline_analyzer.runtime` over one skrub source on the full data or a
+sample folder, with a timeout per pipeline, retry failed and re-measure all.
+It writes the store that already holds this source on this data — the tool
+treats it as a cache: fresh entries are kept, missing and stale ones (other
+code, other stratum build, a sample rebuilt differently) re-measured — or
+creates `runtime_stats_<source>_<sample folder | fulldata>.json`. "check what
+would run" shows the tool's own `--list` (~12 s: it imports stratum for the
+build). Only one sweep runs at a time on the node, because two side by side
+would skew each other's timings. A sweep that finished with some failed
+pipelines is *done* (the failures are counted); *failed* means the tool itself
+crashed.
 
 ## Adding an analysis or action
 
@@ -233,7 +242,8 @@ When a sweep ends, its store shows up in the runtime-store picker.
    registry run and validated parameters (never a path or command from the
    request), and starts it with `actions._start(spec)`.
 3. Add the page or component under `frontend/app/(main)/`. Mutations are
-   server actions (`frontend/app/actions/`), which get Next's Origin check.
+   server actions (`frontend/app/actions/run-actions.ts`), which get Next's
+   Origin check.
 
 ## Status
 
@@ -241,7 +251,7 @@ Done: registry and manifests, API, login, corpus page, run page — source and
 runtime-store pickers, search tree, operator explorer, operator statistics
 (logical, physical), runtime profile, sources and coverage, runtime stores
 (with a quiet hint when measured under an older stratum build), trajectory
-metadata, steps with Δ vs parent, runtime sweep action.
+metadata, steps with Δ vs parent, actions (build sample, runtime sweep).
 
 Left out on purpose: the static report's per-step diff sections (the
 explorer's "diff vs parent" colouring covers one step on demand).

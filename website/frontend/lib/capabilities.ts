@@ -20,7 +20,14 @@ function hasPlans(run: RunDetail): boolean {
 export function capabilities(run: RunDetail): Capability[] {
   const plans = hasPlans(run);
   const data = run.dataset_info.data_status !== "missing" || run.dataset_info.samples.length > 0;
+  const ds = run.dataset_info;
   return [
+    {
+      key: "sample", label: "Build sample", kind: "action",
+      ok: ds.data_status === "local" && ds.has_sample_recipe,
+      reason: !ds.has_sample_recipe ? "no [sample] recipe in dataset.toml"
+        : ds.data_status !== "local" ? "needs the dataset's input/ on this machine" : undefined,
+    },
     {
       key: "sweep", label: "Runtime sweep", kind: "action", ok: plans && data,
       reason: !plans ? "needs skrub DataOps plans"

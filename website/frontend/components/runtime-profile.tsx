@@ -1,4 +1,4 @@
-import { fmtScore, fmtSecs } from "@/lib/format";
+import { dataLabel, fmtScore, fmtSecs } from "@/lib/format";
 import type { RuntimeProfile as Profile, RuntimeStoreDetail } from "@/lib/types";
 import { StaleHint } from "./stale-hint";
 
@@ -8,7 +8,7 @@ export function RuntimeProfile({ profile, store, current }: {
   store: RuntimeStoreDetail;
   current: string | null;
 }) {
-  const where = profile.sample_rows ? `${profile.sample_rows.toLocaleString()} rows` : "the full data";
+  const where = profile.data === "input" && !profile.legacy_rows ? "the full data" : dataLabel(profile);
   return (
     <>
       <p className="muted small">
@@ -17,7 +17,7 @@ export function RuntimeProfile({ profile, store, current }: {
         {fmtSecs(profile.op_total_s)} inside operator bodies out of {fmtSecs(profile.wall_total_s)}{" "}
         of scored grid search. <b>Per call</b> separates an operator that is expensive from one
         that is merely frequent.
-        {profile.sample_rows !== null && " Sampled stores read through a wrapped read_csv, so the read shows as CallOp and is not comparable with a full-data store."}
+        {profile.legacy_rows !== null && " This store comes from the removed row cap, which wrapped read_csv: its read shows as CallOp and is not comparable. Re-measure it on a sample folder."}
       </p>
       <StaleHint store={store} current={current} />
       {store.note && <p className="muted small">{store.note}</p>}

@@ -1,7 +1,7 @@
 "use server";
 
-import { ApiError, planSweep, startSweep, stopJob } from "@/lib/dal";
-import type { Job, SweepParams, SweepPlan } from "@/lib/types";
+import { ApiError, planSample, planSweep, startSample, startSweep, stopJob } from "@/lib/dal";
+import type { Job, SampleParams, SamplePlan, SweepParams, SweepPlan } from "@/lib/types";
 
 // Server actions for the run page's actions panel. Next checks each call's
 // Origin against the host (no cross-site trigger); the DAL re-checks the
@@ -26,6 +26,16 @@ export async function planSweepAction(dataset: string, run: string, params: Swee
 export async function startSweepAction(dataset: string, run: string,
                                        params: SweepParams): Promise<Result<Job>> {
   return wrap(startSweep(dataset, run, params));
+}
+
+export async function planSampleAction(dataset: string, run: string,
+                                       params: SampleParams): Promise<Result<SamplePlan>> {
+  return wrap(planSample(dataset, run, params));
+}
+
+export async function startSampleAction(dataset: string, run: string,
+                                        params: SampleParams): Promise<Result<Job>> {
+  return wrap(startSample(dataset, run, params));
 }
 
 export async function stopJobAction(id: string): Promise<Result<Job>> {

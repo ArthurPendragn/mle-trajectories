@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { dataLabel } from "@/lib/format";
 import type { RuntimeStoreDetail, Selection, Source } from "@/lib/types";
 
 const REASONS: Record<string, string> = {
@@ -62,7 +63,7 @@ export function SelectionBar({ sources, runtime, selection }: {
               {visibleStores.map((r) => (
                 <option key={r.name} value={r.name}>
                   {r.label ?? r.name.replace(/^runtime_stats_/, "")}
-                  {" · "}{r.sample_rows ? `${r.sample_rows.toLocaleString()} rows` : "full data"}
+                  {" · "}{dataLabel(r)}
                 </option>
               ))}
             </select>

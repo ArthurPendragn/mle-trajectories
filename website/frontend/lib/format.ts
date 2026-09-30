@@ -40,3 +40,9 @@ export function fmtNum(x: number | null | undefined, digits = 2): string {
   if (x === null || x === undefined) return "—";
   return Number.isInteger(x) ? String(x) : x.toFixed(digits);
 }
+
+/** Which data a runtime store measured, for a reader. */
+export function dataLabel(r: { data: string; legacy_rows: number | null }): string {
+  if (r.legacy_rows) return `${r.legacy_rows.toLocaleString()}-row cap (legacy)`;
+  return r.data === "input" ? "full data" : r.data;
+}

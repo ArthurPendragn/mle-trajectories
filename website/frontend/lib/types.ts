@@ -18,12 +18,13 @@ export type Source = {
 export type RuntimeStore = {
   file: string;
   source: string | null;
-  sample_rows: number | null;
   data: string;                 // "input" or the sample folder it ran on
+  legacy_rows: number | null;   // measured with the removed --sample-rows cap
   n_ok: number;
   n_failed: number;
   n_code_changed: number;
   n_old_build: number;
+  n_data_changed: number;       // the sample was rebuilt differently since
   commits: string[];
 };
 
@@ -50,6 +51,7 @@ export type DatasetInfo = {
   data: string;
   data_status: "local" | "remote" | "missing";
   samples: string[];
+  has_sample_recipe: boolean;
   note: string | null;
   metric: Metric;
   warnings: string[];
@@ -105,7 +107,8 @@ export type TreeData = {
 export type RuntimeProfile = {
   file: string;
   source: string | null;
-  sample_rows: number | null;
+  data: string;
+  legacy_rows: number | null;
   n_measured: number;
   n_failed: number;
   wall_total_s: number;
@@ -164,7 +167,6 @@ export type AnalysisStatus =
 export type SweepParams = {
   source: string;
   data: string;
-  sample_rows: number | null;
   timeout_s: number;
   retry_failed: boolean;
   force: boolean;
@@ -182,16 +184,43 @@ export type SweepPlan = {
   listing?: { ok: boolean; text: string; would_run: number | null; total: number | null };
 };
 
+export type SampleParams = { size: string; force: boolean };
+
+export type SampleInfo = {
+  name: string;
+  manifest: boolean;
+  size?: number | null;
+  built?: string | null;
+  adopted?: boolean;
+  recipe_sha1?: string | null;
+  note?: string | null;
+  rows?: Record<string, [number | null, number | null]>;   // file -> [out, src]
+};
+
+export type SamplePlan = {
+  dataset: string;
+  name: string;
+  size: number;
+  exists: boolean;
+  recipe_sha1: string;
+  target: string | null;
+  script: string | null;
+  tables: Record<string, string>;
+  force: boolean;
+  command: string;
+};
+
 export type JobState = "starting" | "running" | "done" | "failed" | "stopped" | "lost";
 
 export type Job = {
   id: string;
-  action: string;
+  action: "runtime-sweep" | "build-sample" | string;
   run: string;
+  dataset: string | null;
   label: string;
-  params: SweepParams;
+  params: Partial<SweepParams> & { name?: string; size?: number; force?: boolean };
   command: string;
-  outputs: { runtime?: string };
+  outputs: { runtime?: string; sample?: string };
   started_at: string;
   finished_at: string | null;
   returncode: number | null;
@@ -207,6 +236,14 @@ export type ActionsInfo = {
   sweep: {
     sources: { name: string; label: string | null; coverage: [number, number]; default: boolean }[];
     data: DataOption[];
+  };
+  sample: {
+    ok: boolean;
+    reason: string | null;
+    dataset: string;
+    target: string | null;
+    script: string | null;
+    samples: SampleInfo[];
   };
   jobs: Job[];
   busy: { id: string; run: string; label: string } | null;   // a sweep running anywhere

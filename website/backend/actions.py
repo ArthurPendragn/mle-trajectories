@@ -1,4 +1,5 @@
-"""Long-running actions started from the website. So far: runtime sweeps.
+"""Long-running actions started from the website: runtime sweeps and building
+a dataset sample.
 
 A job is a folder ``website/.cache/actions/<id>/``, so its state survives an API
 restart (``--reload`` restarts on every code change):
@@ -47,7 +48,6 @@ class ActionError(ValueError):
 class SweepParams:
     source: str
     data: str = "input"                # "input" (the full data) or a sample folder
-    sample_rows: int | None = None     # --sample-rows: cap every pandas.read_csv
     timeout_s: int = 3600              # per pipeline
     retry_failed: bool = False
     force: bool = False
@@ -56,14 +56,10 @@ class SweepParams:
     def parse(cls, raw: dict) -> "SweepParams":
         try:
             p = cls(source=str(raw["source"]), data=str(raw.get("data") or "input"),
-                    sample_rows=None if raw.get("sample_rows") in (None, "", 0)
-                    else int(raw["sample_rows"]),
                     timeout_s=int(raw.get("timeout_s") or 3600),
                     retry_failed=bool(raw.get("retry_failed")), force=bool(raw.get("force")))
         except (KeyError, TypeError, ValueError) as exc:
             raise ActionError(f"bad parameters: {exc}") from None
-        if p.sample_rows is not None and not 1 <= p.sample_rows <= 10**10:
-            raise ActionError("row cap must be a positive number")
         if not 10 <= p.timeout_s <= 7 * 86400:
             raise ActionError("timeout must be between 10 s and 7 days")
         return p
@@ -80,21 +76,25 @@ def data_options(run: Run) -> list[dict]:
     elif status == "missing":
         full["note"] = "no input/ on this machine"
     out = [full]
+    building = {j["params"].get("name") for j in running("build-sample")
+                if j.get("dataset") == ds.name}
     for name in ds.samples:
-        out.append({"name": name, "label": f"{name}/input/", "ok": True,
-                    "note": _sample_note(ds.path / name)})
+        info = ds.sample_info(name)
+        ok = name not in building
+        out.append({"name": name, "label": f"{name}/input/", "ok": ok,
+                    "note": "being rebuilt" if not ok else _sample_note(info)})
     return out
 
 
-def _sample_note(folder: Path) -> str | None:
-    """Row counts from a make_sample.py manifest, when the sample has one."""
-    try:
-        rows = json.loads((folder / "sample_manifest.json").read_text()).get("rows") or {}
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return None
-    parts = [f"{f} {r['out']:,} of {r['src']:,} rows" for f, r in rows.items()
-             if isinstance(r, dict) and "out" in r and "src" in r]
-    return "; ".join(parts[:2]) or None
+def _sample_note(info: dict) -> str | None:
+    """Row counts from a sample's manifest: the largest tables first."""
+    if not info.get("manifest"):
+        return "no sample_manifest.json: how it was built is not recorded"
+    rows = sorted(((f, out, src) for f, (out, src) in info["rows"].items() if out is not None),
+                  key=lambda r: -(r[2] or r[1]))
+    parts = [f"{f} {out:,}" + (f" of {src:,}" if src and src != out else "") + " rows"
+             for f, out, src in rows[:2]]
+    return "; ".join(parts) or None
 
 
 def _sweep_source(run: Run, name: str) -> Source:
@@ -107,15 +107,14 @@ def _sweep_source(run: Run, name: str) -> Source:
 
 
 def _sweep_store(run: Run, p: SweepParams) -> tuple[Path, RuntimeStore | None]:
-    """The store a sweep writes: the one already holding this source at this
-    data size (the tool then re-measures only what is missing or stale), else a
-    new ``runtime_stats_<source>[_<sample>][_<N>rows|_fulldata].json``."""
+    """The store a sweep writes: the one already holding this source on this
+    data (the tool then re-measures only what is missing or stale), else a new
+    ``runtime_stats_<source>_<sample folder | fulldata>.json``."""
     for rs in run.runtime:
-        if rs.source == p.source and rs.data == p.data and rs.sample_rows == p.sample_rows:
+        if rs.source == p.source and rs.data == p.data and not rs.legacy_rows:
             return rs.path, rs
-    tag = "" if p.data == "input" else f"_{p.data}"
-    tag += f"_{p.sample_rows}rows" if p.sample_rows else ("_fulldata" if p.data == "input" else "")
-    return run.path / f"runtime_stats_{p.source}{tag}.json", None
+    tag = "fulldata" if p.data == "input" else p.data
+    return run.path / f"runtime_stats_{p.source}_{tag}.json", None
 
 
 def plan_sweep(run: Run, raw: dict, *, listing: bool = False) -> dict:
@@ -135,8 +134,6 @@ def plan_sweep(run: Run, raw: dict, *, listing: bool = False) -> dict:
     for d in src.dirs:
         argv += ["--pipelines", str(d)]
     argv += ["--run-in", str(run_in), "--out", str(store), "--timeout", str(p.timeout_s)]
-    if p.sample_rows:
-        argv += ["--sample-rows", str(p.sample_rows)]
     if p.retry_failed:
         argv.append("--retry-failed")
     if p.force:
@@ -183,6 +180,70 @@ def _list(argv: list[str], cwd: Path) -> dict:
     return {"ok": res.returncode == 0, "text": text,
             "would_run": int(m.group(1)) if m else None,
             "total": int(m.group(2)) if m else None}
+
+
+# --------------------------------------------------------------------------- #
+# build sample: tools/dataset_sample from the dataset.toml recipe
+# --------------------------------------------------------------------------- #
+def sample_options(run: Run) -> dict:
+    """Whether this run's dataset can build a sample, and why not."""
+    ds = run.dataset
+    reason = (None if ds.sample_recipe and ds.has_input
+              else "no [sample] recipe in dataset.toml" if not ds.sample_recipe
+              else "no input/ on this machine to sample from")
+    recipe = ds.sample_recipe or {}
+    return {"ok": reason is None, "reason": reason, "dataset": ds.name,
+            "target": recipe.get("target"), "script": recipe.get("script"),
+            "samples": [ds.sample_info(n) for n in ds.samples]}
+
+
+def _sample_params(raw: dict) -> tuple[int, bool]:
+    from dataset_sample.core import SampleError, parse_size
+    try:
+        size = parse_size(raw.get("size") or "")
+    except SampleError as exc:
+        raise ActionError(str(exc)) from None
+    if size > 10**9:
+        raise ActionError("that is not a sample")
+    return size, bool(raw.get("force"))
+
+
+def plan_sample(run: Run, raw: dict) -> dict:
+    from dataset_sample.core import SampleError, plan
+    opts = sample_options(run)
+    if not opts["ok"]:
+        raise ActionError(opts["reason"])
+    size, force = _sample_params(raw)
+    try:
+        out = plan(run.dataset.path, size)
+    except SampleError as exc:
+        raise ActionError(str(exc)) from None
+    argv = [sys.executable, "-m", "dataset_sample", str(run.dataset.path), "--size", str(size)]
+    if force:
+        argv.append("--force")
+    return {**out, "force": force, "argv": argv,
+            "command": _display(argv, REPO_ROOT)}
+
+
+def start_sample(run: Run, raw: dict) -> dict:
+    """Build a sample. One build per dataset at a time, and never over a sample
+    a sweep is reading (the swap would change its data mid-sweep)."""
+    p = plan_sample(run, raw)
+    if p["exists"] and not p["force"]:
+        raise ActionError(f"{p['name']}/ exists; tick rebuild to replace it")
+    ds = run.dataset.name
+    if any(j.get("dataset") == ds for j in running("build-sample")):
+        raise ActionError(f"a sample of {ds} is already being built")
+    if p["exists"] and any(j.get("dataset") == ds and j["params"].get("data") == p["name"]
+                           for j in running("runtime-sweep")):
+        raise ActionError(f"a runtime sweep is reading {p['name']}; rebuild it afterwards")
+    return _start({
+        "action": "build-sample", "run": run.id, "dataset": ds,
+        "label": f"Build sample · {ds}/{p['name']} · {p['size']:,} rows",
+        "params": {"name": p["name"], "size": p["size"], "force": p["force"]},
+        "argv": p["argv"], "cwd": str(REPO_ROOT), "command": p["command"],
+        "outputs": {"sample": p["name"]},
+    })
 
 
 # --------------------------------------------------------------------------- #
@@ -280,6 +341,7 @@ def job_status(job_id: str, *, log_lines: int = 30) -> dict:
         state = "done"
     return {
         "id": job_id, "action": spec.get("action"), "run": spec.get("run"),
+        "dataset": spec.get("dataset"),
         "label": spec.get("label"), "params": spec.get("params"),
         "command": spec.get("command"), "outputs": spec.get("outputs", {}),
         "started_at": spec.get("started_at"), "finished_at": ended.get("finished_at"),
@@ -296,7 +358,10 @@ def jobs_for(run: Run | None = None, limit: int = 10) -> list[dict]:
     out = []
     for job_id in ids:
         spec = _read_json(CACHE / job_id / "spec.json") or {}
-        if run is None or spec.get("run") == run.id:
+        # a sample belongs to the dataset, so its builds show on every run of it
+        if (run is None or spec.get("run") == run.id
+                or (spec.get("action") == "build-sample"
+                    and spec.get("dataset") == run.dataset.name)):
             out.append(job_status(job_id, log_lines=20))
         if len(out) >= limit:
             break
@@ -316,11 +381,13 @@ def start_sweep(run: Run, raw: dict) -> dict:
         raise ActionError(f"a runtime sweep is already running ({busy[0]['run']}); "
                           "stop it or wait for it to finish")
     p = plan["params"]
-    size = (p["data"] if p["data"] != "input" else "full data") + (
-        f", {p['sample_rows']:,} rows" if p["sample_rows"] else "")
+    if any(j.get("dataset") == run.dataset.name and j["params"].get("name") == p["data"]
+           for j in running("build-sample")):
+        raise ActionError(f"{p['data']} is being rebuilt; wait for the build to finish")
     return _start({
-        "action": "runtime-sweep", "run": run.id,
-        "label": f"Runtime sweep · {p['source']} · {size}",
+        "action": "runtime-sweep", "run": run.id, "dataset": run.dataset.name,
+        "label": f"Runtime sweep · {p['source']} · "
+                 f"{p['data'] if p['data'] != 'input' else 'full data'}",
         "params": p, "argv": plan["argv"], "cwd": plan["cwd"], "command": plan["command"],
         "outputs": {"runtime": Path(plan["store"]).stem},
     })

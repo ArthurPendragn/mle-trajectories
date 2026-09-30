@@ -28,11 +28,13 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from dataset_sample._manifest import MANIFEST, fingerprint, is_sample
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENTS = ("mle-star", "mlevolve", "mle-claude")
 TRAJECTORY_FILES = ("final_state.json", "journal_slim.json")
 
-_DATASET_KEYS = {"label", "task", "data", "note", "metric", "defaults"}
+_DATASET_KEYS = {"label", "task", "data", "note", "metric", "defaults", "sample"}
 _DEFAULTS_KEYS = {"source", "runtime"}
 _RUN_KEYS = {"agent", "label", "note", "trajectory", "originals", "metric", "sources",
              "runtime"}
@@ -109,12 +111,13 @@ class StepInfo:
 class RuntimeStore:
     path: Path
     source: str | None                 # name of the Source it measured
-    sample_rows: int | None
     data: str = "input"                # data folder it ran on: "input" or a sample folder
+    legacy_rows: int | None = None     # measured with the removed --sample-rows cap
     n_ok: int = 0
     n_failed: int = 0
     n_code_changed: int = 0            # ok, but the pipeline file changed since
     n_old_build: int = 0               # ok, but measured under another stratum build
+    n_data_changed: int = 0            # ok, but the sample was rebuilt differently since
     commits: list[str] = field(default_factory=list)   # stratum builds in the store
     measured_at: str | None = None     # newest entry
     label: str | None = None
@@ -128,11 +131,11 @@ class RuntimeStore:
 
     @property
     def n_stale(self) -> int:
-        return self.n_code_changed + self.n_old_build
+        return self.n_code_changed + self.n_old_build + self.n_data_changed
 
     @property
     def full_data(self) -> bool:
-        return self.data == "input" and self.sample_rows is None
+        return self.data == "input" and self.legacy_rows is None
 
 
 @dataclass
@@ -145,6 +148,7 @@ class Dataset:
     note: str | None = None
     metric: Metric = field(default_factory=Metric)
     defaults: dict = field(default_factory=dict)   # [defaults] source / runtime
+    sample_recipe: dict | None = None               # [sample]: how samples are built
     runs: list["Run"] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -154,9 +158,24 @@ class Dataset:
 
     @property
     def samples(self) -> list[str]:
-        """Folders holding a sampled ``input/`` (usable as ``--run-in``)."""
+        """Folders holding a sampled ``input/`` (usable as ``--run-in``); hidden
+        folders (a sample being built) are not samples yet."""
         return sorted(p.name for p in self.path.iterdir()
-                      if p.is_dir() and p.name != "input" and (p / "input").is_dir())
+                      if p.is_dir() and p.name != "input" and not p.name.startswith(".")
+                      and (p / "input").is_dir())
+
+    def sample_info(self, name: str) -> dict:
+        """What a sample folder's manifest says, in brief."""
+        folder = self.path / name
+        try:
+            m = json.loads((folder / MANIFEST).read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"name": name, "manifest": False}
+        rows = {f: r for f, r in (m.get("rows") or {}).items() if isinstance(r, dict)}
+        return {"name": name, "manifest": True, "size": m.get("size"),
+                "built": m.get("built") or m.get("written"), "adopted": bool(m.get("adopted")),
+                "recipe_sha1": m.get("recipe_sha1"), "note": m.get("note"),
+                "rows": {f: [r.get("out"), r.get("src")] for f, r in rows.items()}}
 
     def data_status(self) -> str:
         if self.data != "local":
@@ -385,8 +404,13 @@ def _load_runtime(run: Run, commit: str | None, annotations: dict) -> None:
         # its sample folders; anything else (an old scratch dir) counts as input/
         run_in = Path(meta.get("run_in") or "").name
         data = run_in if run_in in run.dataset.samples else "input"
-        rs = RuntimeStore(path=path, source=source.name if source else None,
-                          sample_rows=meta.get("sample_rows"), data=data)
+        rs = RuntimeStore(path=path, source=source.name if source else None, data=data,
+                          legacy_rows=meta.get("sample_rows"))
+        if rs.legacy_rows:
+            run.warnings.append(f"{path.name}: measured with the removed --sample-rows cap "
+                                f"({rs.legacy_rows:,} rows); re-measure on a sample folder")
+        folder = run.dataset.path / data
+        current_fp = fingerprint(folder) if data != "input" and is_sample(folder) else None
         # older stores stamp the build only once, in meta, not per entry
         store_commit = (meta.get("versions") or {}).get("stratum_commit")
         commits, stamps = set(), []
@@ -404,6 +428,8 @@ def _load_runtime(run: Run, commit: str | None, annotations: dict) -> None:
                 rs.n_code_changed += 1
             elif commit and built != commit:
                 rs.n_old_build += 1
+            elif current_fp and entry.get("data_fingerprint") != current_fp:
+                rs.n_data_changed += 1
         rs.commits = sorted(commits)
         rs.measured_at = max(stamps, default=None)
         ann = annotations.get(path.stem) or {}
@@ -512,7 +538,8 @@ def load_dataset(path: Path, commit: str | None = None) -> Dataset:
                  task=cfg.get("task"), data=cfg.get("data") or "local",
                  note=cfg.get("note"),
                  metric=_metric(cfg.get("metric"), "dataset.toml", warnings),
-                 defaults=defaults, warnings=warnings)
+                 defaults=defaults, warnings=warnings,
+                 sample_recipe=cfg.get("sample") if isinstance(cfg.get("sample"), dict) else None)
     for child in sorted(path.iterdir()):
         if _is_run_dir(child):
             ds.runs.append(load_run(ds, child, commit))
@@ -556,7 +583,7 @@ def _fmt_runtime(run: Run) -> str:
     if not run.runtime:
         return "—"
     return ", ".join(f"{r.n_ok}" + (f"/{r.n_stale} stale" if r.n_stale else "")
-                     + (f"@{r.sample_rows}" if r.sample_rows else "") for r in run.runtime)
+                     + (f"@{r.data}" if r.data != "input" else "") for r in run.runtime)
 
 
 def _print_table(corpus: list[Dataset]) -> None:
@@ -604,7 +631,7 @@ def _print_run(run: Run) -> None:
             print(f"      {s.note}")
     for r in run.runtime:
         print(f"  runtime {r.path.name}: source {r.source or '?'}, {r.n_ok} ok, "
-              f"{r.n_failed} failed, {r.n_stale} stale, data={r.data}, sample_rows={r.sample_rows}")
+              f"{r.n_failed} failed, {r.n_stale} stale, data={r.data}" + (f", legacy cap {r.legacy_rows}" if r.legacy_rows else ""))
     print(f"  data: {run.dataset.data_status()}"
           + (f", samples {', '.join(run.dataset.samples)}" if run.dataset.samples else ""))
     for w in run.dataset.warnings + run.warnings:

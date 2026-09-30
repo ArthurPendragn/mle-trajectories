@@ -49,10 +49,10 @@ def _source(run: Run, s: Source) -> dict:
 
 def _runtime(r: RuntimeStore) -> dict:
     return {"name": r.name, "file": r.path.name, "source": r.source,
-            "sample_rows": r.sample_rows, "data": r.data, "label": r.label, "note": r.note,
+            "data": r.data, "legacy_rows": r.legacy_rows, "label": r.label, "note": r.note,
             "hidden": r.hidden, "measured_at": r.measured_at,
             "n_ok": r.n_ok, "n_failed": r.n_failed, "n_code_changed": r.n_code_changed,
-            "n_old_build": r.n_old_build, "commits": r.commits}
+            "n_old_build": r.n_old_build, "n_data_changed": r.n_data_changed, "commits": r.commits}
 
 
 def _step(s: StepInfo) -> dict:
@@ -77,7 +77,8 @@ def _run_summary(run: Run) -> dict:
 
 def _dataset(ds: Dataset, runs: bool = True) -> dict:
     out = {"name": ds.name, "label": ds.label, "task": ds.task, "data": ds.data,
-           "data_status": ds.data_status(), "samples": ds.samples, "note": ds.note,
+           "data_status": ds.data_status(), "samples": ds.samples,
+           "has_sample_recipe": ds.sample_recipe is not None, "note": ds.note,
            "metric": _metric(ds.metric), "warnings": ds.warnings}
     if runs:
         out["runs"] = [_run_summary(r) for r in ds.runs]
@@ -213,6 +214,7 @@ def run_actions(dataset: str, run: str) -> dict:
                         for s in r.sources if s.skrub and s.files and not s.hidden],
             "data": actions.data_options(r),
         },
+        "sample": actions.sample_options(r),
         "jobs": actions.jobs_for(r),
         # a sweep anywhere on the node blocks starting another one
         "busy": next(({"id": j["id"], "run": j["run"], "label": j["label"]}
@@ -228,6 +230,16 @@ def sweep_plan(dataset: str, run: str, params: dict = Body(...), listing: bool =
 @app.post("/api/runs/{dataset}/{run}/actions/runtime-sweep")
 def sweep_start(dataset: str, run: str, params: dict = Body(...)) -> dict:
     return _action(actions.start_sweep, _find_run(dataset, run), params)
+
+
+@app.post("/api/runs/{dataset}/{run}/actions/build-sample/plan")
+def sample_plan(dataset: str, run: str, params: dict = Body(...)) -> dict:
+    return _action(actions.plan_sample, _find_run(dataset, run), params)
+
+
+@app.post("/api/runs/{dataset}/{run}/actions/build-sample")
+def sample_start(dataset: str, run: str, params: dict = Body(...)) -> dict:
+    return _action(actions.start_sample, _find_run(dataset, run), params)
 
 
 @app.get("/api/jobs")

@@ -203,3 +203,4 @@ tr:target td { background: var(--best); }
 .badge.state-done { color: var(--up); }
 .badge.state-failed, .badge.state-lost { color: var(--down); }
 .badge .spinner { width: 8px; height: 8px; border-width: 1.5px; }
+.sweep-cap button.on { border-color: var(--accent); color: var(--accent); }

@@ -71,7 +71,7 @@ def build_profile(run: Run, store: RuntimeStore, current_commit: str | None,
     pipelines.sort(key=lambda p: -(p["wall_s"] or 0))
     return {
         "file": store.path.name, "source": store.source,
-        "sample_rows": store.sample_rows,
+        "data": store.data, "legacy_rows": store.legacy_rows,
         "n_measured": len(measured), "n_failed": len(pipelines) - len(measured),
         "wall_total_s": sum(p["wall_s"] or 0 for p in measured),
         "op_total_s": total_op,
