@@ -1,0 +1,1410 @@
+from collections import Counter, defaultdict
+import gc
+import math
+import os
+import pickle
+import time
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+from scipy.sparse import csr_matrix
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.preprocessing import StandardScaler
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+
+def calc_entropy(s: str) -> float:
+    """Calculate Shannon entropy of a string."""
+    if not s:
+        return 0.0
+    counts = Counter(s)
+    n = len(s)
+    return -sum((cnt / n) * math.log2(cnt / n) for cnt in counts.values())
+
+
+def extract_host_from_url(url_str: str) -> str:
+    """Extract clean hostname from URL string."""
+    if not isinstance(url_str, str):
+        return ""
+    s = url_str.split("://", 1)[-1]
+    host = s.split("/", 1)[0].split(":", 1)[0].lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+COMPOUND_CCTLDS = (
+    ".co.uk", ".org.uk", ".gov.uk", ".ac.uk", ".me.uk", ".ltd.uk", ".net.uk",
+    ".com.au", ".net.au", ".org.au", ".edu.au", ".gov.au",
+    ".co.nz", ".net.nz", ".org.nz", ".govt.nz",
+    ".co.jp", ".ne.jp", ".or.jp", ".go.jp", ".ac.jp",
+    ".com.br", ".net.br", ".org.br", ".gov.br",
+    ".com.mx", ".org.mx", ".gob.mx", ".edu.mx",
+    ".co.in", ".net.in", ".org.in", ".gen.in", ".firm.in", ".ind.in",
+    ".com.ar", ".net.ar", ".org.ar", ".gov.ar",
+    ".com.tr", ".org.tr", ".edu.tr", ".gov.tr",
+    ".co.za", ".org.za", ".web.za", ".net.za",
+    ".com.sg", ".net.sg", ".org.sg", ".edu.sg",
+    ".com.pl", ".net.pl", ".org.pl", ".info.pl",
+    ".com.ru", ".net.ru", ".org.ru", ".pp.ru",
+    ".co.kr", ".ne.kr", ".or.kr", ".re.kr",
+    ".com.tw", ".org.tw", ".net.tw", ".idv.tw",
+    ".com.hk", ".org.hk", ".net.hk", ".edu.hk",
+    ".com.cn", ".net.cn", ".org.cn", ".gov.cn",
+    ".co.id", ".web.id", ".or.id", ".ac.id",
+    ".com.co", ".org.co", ".net.co",
+    ".com.my", ".org.my", ".net.my", ".edu.my",
+    ".com.ph", ".org.ph", ".net.ph",
+    ".com.pk", ".org.pk", ".net.pk",
+    ".com.vn", ".org.vn", ".net.vn",
+    ".com.ng", ".org.ng", ".gov.ng",
+    ".co.th", ".or.th", ".ac.th",
+    ".co.il", ".org.il", ".net.il",
+    ".com.ua", ".org.ua", ".net.ua",
+    ".com.es", ".org.es", ".nom.es",
+    ".com.pt", ".org.pt",
+    ".com.ve", ".co.ve",
+    ".gc.ca",
+)
+
+
+def extract_tld(name: str) -> str:
+    """Extract compound ccTLD or single TLD."""
+    if not isinstance(name, str) or not name:
+        return ""
+    d = name.lower().strip()
+    for suffix in COMPOUND_CCTLDS:
+        if d.endswith(suffix):
+            return suffix[1:]
+    if "." in d:
+        return d.rsplit(".", 1)[-1]
+    return ""
+
+
+def extract_root_domain_body(name: str) -> str:
+    """Extract clean registrable domain body by stripping 'www.' prefix and compound/single TLD suffix."""
+    if not isinstance(name, str) or not name:
+        return ""
+    d = name.lower().strip()
+    if d.startswith("www."):
+        d = d[4:]
+    for suffix in COMPOUND_CCTLDS:
+        if d.endswith(suffix):
+            stripped = d[: -len(suffix)]
+            if "." in stripped:
+                stripped = stripped.rsplit(".", 1)[-1]
+            return stripped if stripped else d
+    if "." in d:
+        parts = d.rsplit(".", 2)
+        return parts[-2] if len(parts) >= 2 else parts[0]
+    return d
+
+
+class TrackerSyndicateNet(nn.Module):
+    """Equivariant Graph-Transformer Relational Architecture featuring Pre-LayerNorm
+    domain-to-tracker cross-attention and co-occurrence-biased tracker self-attention
+    with residual direct link shortcuts and empirical log-odds bias initialization.
+    """
+
+    def __init__(
+        self,
+        num_trackers: int = 355,
+        num_tracker_channels: int = 6,
+        context_dim: int = 416,
+        d_model: int = 128,
+        n_heads: int = 4,
+        context_hidden_dim: int = 512,
+        dropout_rate: float = 0.10,
+        trackers_tsv_path: str = "input/trackers.tsv",
+        cond_cooccur_matrix: np.ndarray = None,
+        ppmi_matrix: np.ndarray = None,
+        prior_log_odds: np.ndarray = None,
+        **kwargs,
+    ):
+        super().__init__()
+        self.num_trackers = num_trackers
+        self.num_tracker_channels = num_tracker_channels
+        self.context_dim = context_dim
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+
+        # 1. Load trackers metadata to construct identity & categorical embeddings
+        trackers_df = pd.read_csv(trackers_tsv_path, sep="\t")
+        trackers_df = trackers_df.sort_values("tracker_id").reset_index(drop=True)
+
+        companies = trackers_df["company"].fillna("Unknown").astype(str).values
+        categories = trackers_df["category"].fillna("Unknown").astype(str).values
+        countries = trackers_df["country"].fillna("Unknown").astype(str).values
+
+        unique_comps, comp_idx = np.unique(companies, return_inverse=True)
+        unique_cats, cat_idx = np.unique(categories, return_inverse=True)
+        unique_ctrys, ctry_idx = np.unique(countries, return_inverse=True)
+
+        id_dim = 16
+        comp_dim = 8
+        cat_dim = 4
+        ctry_dim = 4
+        static_dim = id_dim + comp_dim + cat_dim + ctry_dim  # 32
+
+        self.tracker_id_emb = nn.Embedding(num_trackers, id_dim)
+        self.comp_emb = nn.Embedding(len(unique_comps), comp_dim)
+        self.cat_emb = nn.Embedding(len(unique_cats), cat_dim)
+        self.ctry_emb = nn.Embedding(len(unique_ctrys), ctry_dim)
+
+        self.register_buffer("comp_indices", torch.tensor(comp_idx, dtype=torch.long))
+        self.register_buffer("cat_indices", torch.tensor(cat_idx, dtype=torch.long))
+        self.register_buffer("ctry_indices", torch.tensor(ctry_idx, dtype=torch.long))
+        self.register_buffer(
+            "tracker_indices", torch.arange(num_trackers, dtype=torch.long)
+        )
+
+        # 2. Empirical Log-Odds Priors & Co-occurrence Topology
+        if prior_log_odds is None:
+            prior_log_odds = np.zeros(num_trackers, dtype=np.float32)
+        self.register_buffer(
+            "b_prior", torch.tensor(prior_log_odds, dtype=torch.float32)
+        )
+
+        # Numerically bounded empirical log-odds co-occurrence bias
+        if cond_cooccur_matrix is None:
+            cond_cooccur_matrix = np.zeros((num_trackers, num_trackers), dtype=np.float32)
+
+        eps = 1e-4
+        cooccur_clamped = np.clip(cond_cooccur_matrix, 0.0, 1.0 - eps)
+        log_odds_cooccur = np.log((cooccur_clamped + eps) / (1.0 - cooccur_clamped + eps))
+        np.fill_diagonal(log_odds_cooccur, 0.0)
+        log_odds_cooccur = np.clip(log_odds_cooccur, -5.0, 5.0).astype(np.float32)
+
+        self.register_buffer(
+            "rel_cooccur_bias",
+            torch.tensor(log_odds_cooccur, dtype=torch.float32).unsqueeze(0).unsqueeze(0),
+        )
+        self.bias_head_scale = nn.Parameter(
+            torch.full((1, n_heads, 1, 1), 0.2, dtype=torch.float32)
+        )
+
+        # 3. Domain Context Encoder Tower (Pre-LN MLP) -> [B, d_model]
+        self.context_encoder = nn.Sequential(
+            nn.Linear(context_dim, context_hidden_dim),
+            nn.LayerNorm(context_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(context_hidden_dim, d_model),
+            nn.LayerNorm(d_model),
+        )
+
+        # 4. Candidate Tracker Tokens Input Projection: static metadata (32) + 6 channels -> d_model
+        tracker_input_dim = static_dim + num_tracker_channels  # 38
+        self.tracker_token_proj = nn.Sequential(
+            nn.Linear(tracker_input_dim, d_model),
+            nn.LayerNorm(d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+
+        # 5. Pre-LayerNorm Domain-to-Tracker Cross-Attention
+        self.cross_ln_ctx = nn.LayerNorm(d_model)
+        self.cross_ln_tr = nn.LayerNorm(d_model)
+
+        self.cross_q = nn.Linear(d_model, d_model)
+        self.cross_k = nn.Linear(d_model, d_model)
+        self.cross_aff_proj = nn.Linear(n_heads, d_model)
+        self.cross_dropout = nn.Dropout(dropout_rate)
+
+        # 6. Relational Tracker Self-Attention Block with Additive Log-Odds Bias
+        self.self_ln = nn.LayerNorm(d_model)
+        self.self_q = nn.Linear(d_model, d_model)
+        self.self_k = nn.Linear(d_model, d_model)
+        self.self_v = nn.Linear(d_model, d_model)
+        self.self_out = nn.Linear(d_model, d_model)
+        self.self_dropout = nn.Dropout(dropout_rate)
+
+        # Feed-Forward Network (FFN)
+        self.ffn_ln = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(d_model * 2, d_model),
+            nn.Dropout(dropout_rate),
+        )
+
+        # 7. Final Projection Head with Residual Direct Link Shortcut & Prior Bias Init
+        self.head_ln = nn.LayerNorm(d_model)
+        self.final_head = nn.Linear(d_model, 1)
+        self.direct_shortcut_weight = nn.Parameter(
+            torch.tensor([1.0], dtype=torch.float32)
+        )
+
+        self._init_weights()
+        with torch.no_grad():
+            self.final_head.bias.copy_(self.b_prior.mean())
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Embedding):
+                nn.init.normal_(m.weight, mean=0.0, std=0.02)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.size(0)
+        split_idx = self.num_trackers * self.num_tracker_channels
+
+        # Split tracker-aligned channels vs domain context
+        x_trackers_flat = x[:, :split_idx]  # [B, 6 * 355]
+        x_context = x[:, split_idx:]  # [B, context_dim]
+
+        # Reshape to [B, num_trackers, num_tracker_channels]
+        x_trackers = x_trackers_flat.view(
+            batch_size, self.num_tracker_channels, self.num_trackers
+        ).permute(0, 2, 1)
+
+        # Static tracker metadata representations -> [B, num_trackers, 32]
+        static_embs = torch.cat(
+            [
+                self.tracker_id_emb(self.tracker_indices),
+                self.comp_emb(self.comp_indices),
+                self.cat_emb(self.cat_indices),
+                self.ctry_emb(self.ctry_indices),
+            ],
+            dim=-1,
+        ).unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Candidate tracker tokens: static embeddings + 6 evidence channels
+        tracker_tokens_in = torch.cat([static_embs, x_trackers], dim=-1)
+        H_tr = self.tracker_token_proj(tracker_tokens_in)  # [B, num_trackers, d_model]
+
+        # Domain Context Tower -> [B, 1, d_model]
+        h_ctx = self.context_encoder(x_context).unsqueeze(1)
+
+        # Pre-LayerNorm Domain-to-Tracker Cross-Attention
+        q_ctx = self.cross_q(self.cross_ln_ctx(h_ctx))  # [B, 1, d_model]
+        k_tr = self.cross_k(self.cross_ln_tr(H_tr))     # [B, num_trackers, d_model]
+
+        q_ctx_h = q_ctx.view(batch_size, 1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        k_tr_h = k_tr.view(batch_size, self.num_trackers, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        cross_aff = torch.matmul(q_ctx_h, k_tr_h.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        cross_aff_tracker = cross_aff.squeeze(2).permute(0, 2, 1)  # [B, num_trackers, H]
+        aff_emb = self.cross_aff_proj(cross_aff_tracker)           # [B, num_trackers, d_model]
+
+        # Contextualize tracker tokens
+        H_tr = H_tr + self.cross_dropout(aff_emb + h_ctx)
+
+        # Relational Multi-Head Self-Attention with Additive Co-occurrence Bias
+        H_tr_norm = self.self_ln(H_tr)
+        q_sa = self.self_q(H_tr_norm).view(batch_size, self.num_trackers, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        k_sa = self.self_k(H_tr_norm).view(batch_size, self.num_trackers, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+        v_sa = self.self_v(H_tr_norm).view(batch_size, self.num_trackers, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
+
+        attn_bias = self.bias_head_scale * self.rel_cooccur_bias  # [1, H, num_trackers, num_trackers]
+        sa_out = F.scaled_dot_product_attention(
+            q_sa, k_sa, v_sa, attn_mask=attn_bias, dropout_p=0.10 if self.training else 0.0
+        )
+        sa_out = sa_out.permute(0, 2, 1, 3).contiguous().view(batch_size, self.num_trackers, self.d_model)
+        H_tr = H_tr + self.self_dropout(self.self_out(sa_out))
+
+        # Feed-Forward Network
+        H_tr = H_tr + self.ffn(self.ffn_ln(H_tr))
+
+        # Final projection to logits
+        tracker_logits = self.final_head(self.head_ln(H_tr)).squeeze(-1)  # [B, num_trackers]
+        tracker_logits = tracker_logits + self.b_prior.unsqueeze(0)
+
+        # Residual direct link shortcut
+        direct_link_channel = x_trackers[:, :, 0]
+        logits = tracker_logits + self.direct_shortcut_weight * direct_link_channel
+
+        return logits
+
+
+class SmoothRecall10Loss(nn.Module):
+    """Numerically bounded, float32-evaluated Top-10 soft-rank objective
+    regularized with focal binary cross-entropy.
+    """
+
+    def __init__(
+        self,
+        tau: float = 0.5,
+        beta: float = 1.0,
+        bce_weight: float = 0.10,
+        pos_weight: float = 5.0,
+        top_k_neg: int = 30,
+        focal_gamma: float = 1.5,
+        huber_delta: float = 2.0,
+        **kwargs,
+    ):
+        super().__init__()
+        self.tau = tau
+        self.beta = beta
+        self.bce_weight = bce_weight
+        self.top_k_neg = top_k_neg
+        self.focal_gamma = focal_gamma
+        self.huber_delta = huber_delta
+        self.register_buffer("pos_weight", torch.tensor([pos_weight], dtype=torch.float32))
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # All ranking and focal computations executed strictly in torch.float32
+        logits_f32 = logits.float()
+        targets_f32 = targets.float()
+        batch_size, num_classes = logits_f32.shape
+
+        pos_indices = torch.nonzero(targets_f32 > 0.5, as_tuple=True)
+        pos_b = pos_indices[0]
+        pos_j = pos_indices[1]
+
+        if pos_b.numel() > 0:
+            # Active Negative Distractor Selection with safe float32 bound
+            masked_neg_logits = torch.where(
+                targets_f32 < 0.5, logits_f32, torch.full_like(logits_f32, -100.0)
+            )
+            k_neg = min(self.top_k_neg, num_classes)
+            top_neg_logits, _ = torch.topk(masked_neg_logits, k=k_neg, dim=1)
+
+            top_neg_for_pos = top_neg_logits[pos_b]
+            pos_logits = logits_f32[pos_b, pos_j]
+
+            # Pairwise logit differences clamped to [-10, 10]
+            diff_neg = (top_neg_for_pos - pos_logits.unsqueeze(1)) / self.tau
+            diff_neg = torch.clamp(diff_neg, min=-10.0, max=10.0)
+            neg_intruders = torch.sigmoid(diff_neg).sum(dim=1)
+
+            # Peer positives ahead of tracker j with detached peer logits
+            batch_logits = logits_f32[pos_b]
+            batch_targets = targets_f32[pos_b]
+            peer_pos_mask = (batch_targets > 0.5).float().clone()
+            peer_pos_mask[torch.arange(pos_b.size(0), device=logits.device), pos_j] = 0.0
+
+            diff_pos = (batch_logits.detach() - pos_logits.unsqueeze(1)) / self.tau
+            diff_pos = torch.clamp(diff_pos, min=-10.0, max=10.0)
+            pos_ahead_j = (torch.sigmoid(diff_pos) * peer_pos_mask).sum(dim=1)
+
+            # Continuous Soft Rank of positive tracker j
+            soft_rank_j = 1.0 + pos_ahead_j + neg_intruders
+
+            # Penalize soft ranks exceeding 10.0 via a smooth bounded Huber penalty
+            excess = F.relu(soft_rank_j - 10.0)
+            delta = self.huber_delta
+            huber_penalty = torch.where(
+                excess < delta,
+                0.5 * (excess ** 2) / delta,
+                excess - 0.5 * delta,
+            )
+
+            # Normalize penalty per domain
+            pos_counts = targets_f32.sum(dim=1).clamp(min=1.0)
+            sample_rank_loss = torch.zeros(
+                batch_size, device=logits.device, dtype=torch.float32
+            ).scatter_add(0, pos_b, huber_penalty / pos_counts[pos_b])
+
+            rank_loss = sample_rank_loss.mean()
+        else:
+            rank_loss = torch.tensor(
+                0.0, device=logits.device, dtype=torch.float32, requires_grad=True
+            )
+
+        # Numerically stable Focal Binary Cross-Entropy Loss
+        bce_raw = F.binary_cross_entropy_with_logits(logits_f32, targets_f32, reduction="none")
+        p = torch.sigmoid(logits_f32)
+        p_t = p * targets_f32 + (1.0 - p) * (1.0 - targets_f32)
+        focal_weight = (1.0 - p_t) ** self.focal_gamma
+        pos_w = self.pos_weight.to(device=logits.device, dtype=torch.float32)
+        alpha_t = targets_f32 * pos_w + (1.0 - targets_f32) * 1.0
+        focal_bce = (alpha_t * focal_weight * bce_raw).mean()
+
+        return rank_loss + self.bce_weight * focal_bce
+
+
+class ModelEMA:
+    """Maintains Exponential Moving Average (EMA) of model parameters for validation evaluation
+    and test checkpoint selection.
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    @torch.no_grad()
+    def update(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name].mul_(self.decay).add_(
+                    param.data, alpha=1.0 - self.decay
+                )
+
+    def apply_shadow(self, model: nn.Module) -> dict:
+        backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+        return backup
+
+    def restore(self, model: nn.Module, backup: dict):
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                param.data.copy_(backup[name])
+
+
+def compute_recall_at_10(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    """Exact competition metric: Recall@10 averaged across all domains."""
+    with torch.no_grad():
+        top10_indices = torch.topk(logits, k=10, dim=1).indices
+        hits = torch.gather(targets, dim=1, index=top10_indices).sum(dim=1)
+        pos_counts = targets.sum(dim=1).clamp(min=1.0)
+        sample_recall = hits / pos_counts
+        return float(sample_recall.mean().item())
+
+
+def main():
+    global_start_time = time.time()
+
+    # Set random seeds for deterministic execution
+    torch.manual_seed(42)
+    np.random.seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+
+    os.makedirs("./working", exist_ok=True)
+    os.makedirs("./submission", exist_ok=True)
+
+    print("Starting leak-free data processing and feature engineering pipeline...")
+
+    # ---------------------------------------------------------
+    # 1. Load Trackers & Metadata
+    # ---------------------------------------------------------
+    trackers_df = pd.read_csv("input/trackers.tsv", sep="\t")
+    num_trackers = 355
+    tracker_ids = trackers_df["tracker_id"].values.astype(np.int32)
+    tracking_domain_ids = trackers_df["tracking_domain_id"].values.astype(np.int64)
+
+    tracker_id_to_domain_id = np.zeros(num_trackers, dtype=np.int64)
+    domain_id_to_tracker_id = {}
+    for tid, did in zip(tracker_ids, tracking_domain_ids):
+        tracker_id_to_domain_id[tid] = did
+        domain_id_to_tracker_id[did] = tid
+
+    # ---------------------------------------------------------
+    # 2. Split Domains: Train, Holdout Validation, and Test
+    # ---------------------------------------------------------
+    tracking_train_df = pd.read_parquet("input/tracking_graph_train.parquet")
+    all_train_domains = (
+        tracking_train_df["domain_id"].drop_duplicates().values.astype(np.int64)
+    )
+
+    rng = np.random.RandomState(42)
+    shuffled_domains = rng.permutation(all_train_domains)
+    val_size = 25000
+    val_domain_ids = shuffled_domains[:val_size]
+    train_domain_ids = shuffled_domains[val_size:]
+
+    test_target_df = pd.read_csv("input/target.tsv", sep="\t")
+    test_domain_ids = test_target_df["domain_id"].values.astype(np.int64)
+
+    print(
+        f"Domain Split -> Train: {len(train_domain_ids)}, Val:"
+        f" {len(val_domain_ids)}, Test: {len(test_domain_ids)}"
+    )
+
+    # ---------------------------------------------------------
+    # 3. Construct Target Label Matrices (Train & Val)
+    # ---------------------------------------------------------
+    train_domain_to_row = {d: i for i, d in enumerate(train_domain_ids)}
+    val_domain_to_row = {d: i for i, d in enumerate(val_domain_ids)}
+
+    y_train = np.zeros((len(train_domain_ids), num_trackers), dtype=np.uint8)
+    y_val = np.zeros((len(val_domain_ids), num_trackers), dtype=np.uint8)
+
+    train_mask = np.isin(
+        tracking_train_df["domain_id"],
+        train_domain_ids,
+        assume_unique=False,
+    )
+    val_mask = np.isin(
+        tracking_train_df["domain_id"],
+        val_domain_ids,
+        assume_unique=False,
+    )
+
+    train_edges = tracking_train_df[train_mask]
+    val_edges = tracking_train_df[val_mask]
+
+    train_rows = train_edges["domain_id"].map(train_domain_to_row).to_numpy()
+    train_cols = train_edges["tracker_id"].to_numpy()
+    y_train[train_rows, train_cols] = 1
+
+    val_rows = val_edges["domain_id"].map(val_domain_to_row).to_numpy()
+    val_cols = val_edges["tracker_id"].to_numpy()
+    y_val[val_rows, val_cols] = 1
+
+    del tracking_train_df, train_edges, val_edges, train_rows, val_rows
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # 4. Domain Lookup & Graph Subgraph Indexing
+    # ---------------------------------------------------------
+    all_relevant_domain_ids = np.concatenate(
+        [train_domain_ids, val_domain_ids, test_domain_ids]
+    )
+    num_rel = len(all_relevant_domain_ids)
+
+    domains_df = pd.read_parquet(
+        "input/domains.parquet", columns=["domain_id", "domain"]
+    )
+    max_domain_id = max(
+        int(domains_df["domain_id"].max()),
+        int(all_relevant_domain_ids.max()),
+        int(tracking_domain_ids.max()),
+    )
+
+    id_to_idx = np.full(max_domain_id + 1, -1, dtype=np.int32)
+    id_to_idx[all_relevant_domain_ids] = np.arange(num_rel, dtype=np.int32)
+
+    tracker_domain_to_id = np.full(max_domain_id + 1, -1, dtype=np.int16)
+    tracker_domain_to_id[tracking_domain_ids] = tracker_ids.astype(np.int16)
+
+    set_relevant_ids = set(all_relevant_domain_ids)
+    relevant_domains_df = domains_df[domains_df["domain_id"].isin(set_relevant_ids)]
+    domain_dict = dict(
+        zip(relevant_domains_df["domain_id"], relevant_domains_df["domain"])
+    )
+    del domains_df, relevant_domains_df
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # 5. Stream Link-Graph: Degrees, Tracker Links & Adjacency
+    # ---------------------------------------------------------
+    print("Streaming link-graph.parquet for topology & tracker signals...")
+    global_out_degree = np.zeros(num_rel, dtype=np.int32)
+    global_in_degree = np.zeros(num_rel, dtype=np.int32)
+
+    rel_src_list = []
+    rel_dst_list = []
+    tr_src_list = []
+    tr_id_list = []
+
+    link_graph_pq = pq.ParquetFile("input/link-graph.parquet")
+    for batch in link_graph_pq.iter_batches(
+        batch_size=3000000, columns=["source_domain_id", "target_domain_id"]
+    ):
+        src = batch["source_domain_id"].to_numpy(zero_copy_only=False)
+        dst = batch["target_domain_id"].to_numpy(zero_copy_only=False)
+
+        bound_mask = (src <= max_domain_id) & (dst <= max_domain_id)
+        if not np.all(bound_mask):
+            src = src[bound_mask]
+            dst = dst[bound_mask]
+
+        src_idx = id_to_idx[src]
+        dst_idx = id_to_idx[dst]
+
+        src_valid = src_idx >= 0
+        dst_valid = dst_idx >= 0
+
+        if np.any(src_valid):
+            np.add.at(global_out_degree, src_idx[src_valid], 1)
+        if np.any(dst_valid):
+            np.add.at(global_in_degree, dst_idx[dst_valid], 1)
+
+        tr_ids = tracker_domain_to_id[dst]
+        tr_mask = src_valid & (tr_ids >= 0)
+        if np.any(tr_mask):
+            tr_src_list.append(src_idx[tr_mask])
+            tr_id_list.append(tr_ids[tr_mask])
+
+        rel_mask = src_valid & dst_valid
+        if np.any(rel_mask):
+            rel_src_list.append(src_idx[rel_mask])
+            rel_dst_list.append(dst_idx[rel_mask])
+
+    print("Link graph streaming completed.")
+
+    # ---------------------------------------------------------
+    # 6. Direct & Corporate Sibling Tracker Links Matrix
+    # ---------------------------------------------------------
+    # Construct corporate co-membership adjacency prior
+    companies = trackers_df["company"].fillna("Unknown").astype(str).values
+    brands = (
+        trackers_df["brand"].fillna("Unknown").astype(str).values
+        if "brand" in trackers_df.columns
+        else companies
+    )
+    invalid_tags = {"#", "", "unknown", "none"}
+    corp_adj_np = np.zeros((num_trackers, num_trackers), dtype=np.float32)
+    for i in range(num_trackers):
+        for j in range(num_trackers):
+            if i == j:
+                continue
+            c_i, c_j = companies[i].strip().lower(), companies[j].strip().lower()
+            b_i, b_j = brands[i].strip().lower(), brands[j].strip().lower()
+            same_comp = (c_i == c_j) and (c_i not in invalid_tags)
+            same_brand = (b_i == b_j) and (b_i not in invalid_tags)
+            if same_comp or same_brand:
+                corp_adj_np[i, j] = 1.0
+
+    row_sums = corp_adj_np.sum(axis=1, keepdims=True)
+    corp_adj_norm = np.where(
+        row_sums > 0, corp_adj_np / np.maximum(row_sums, 1.0), 0.0
+    ).astype(np.float32)
+    corp_adj_sparse = csr_matrix(corp_adj_norm)
+
+    if tr_src_list:
+        all_tr_src = np.concatenate(tr_src_list)
+        all_tr_id = np.concatenate(tr_id_list)
+        direct_tracker_csr = csr_matrix(
+            (np.ones(len(all_tr_src), dtype=np.float32), (all_tr_src, all_tr_id)),
+            shape=(num_rel, num_trackers),
+        )
+        tracker_link_counts = np.array(direct_tracker_csr.sum(axis=1)).flatten()
+
+        # Enriched direct tracking evidence aggregating corporate sibling domain hyperlinks
+        sibling_tracker_csr = direct_tracker_csr.dot(corp_adj_sparse)
+        direct_tracker_links = np.empty((num_rel, num_trackers), dtype=np.float32)
+        chunk_sz = 2000000
+        for ch_s in range(0, num_rel, chunk_sz):
+            ch_e = min(ch_s + chunk_sz, num_rel)
+            d_sub = direct_tracker_csr[ch_s:ch_e].toarray()
+            s_sub = sibling_tracker_csr[ch_s:ch_e].toarray()
+            direct_tracker_links[ch_s:ch_e] = np.log1p(d_sub + 0.5 * s_sub)
+        del sibling_tracker_csr, corp_adj_sparse
+    else:
+        direct_tracker_links = np.zeros((num_rel, num_trackers), dtype=np.float32)
+        tracker_link_counts = np.zeros(num_rel, dtype=np.float32)
+
+    del tr_src_list, tr_id_list
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # 7. TLD Parsing & Bayesian Smoothed Regional Priors
+    # ---------------------------------------------------------
+    print("Constructing Bayesian smoothed TLD regional priors...")
+    train_indices_in_rel = id_to_idx[train_domain_ids]
+    domain_tlds = []
+    domain_lens = np.zeros(num_rel, dtype=np.float32)
+    subdomain_counts = np.zeros(num_rel, dtype=np.float32)
+    hyphen_counts = np.zeros(num_rel, dtype=np.float32)
+    digit_ratios = np.zeros(num_rel, dtype=np.float32)
+    vowel_ratios = np.zeros(num_rel, dtype=np.float32)
+    entropies = np.zeros(num_rel, dtype=np.float32)
+    domain_names_list = []
+
+    vowels = set("aeiou")
+    for i, did in enumerate(all_relevant_domain_ids):
+        name = domain_dict.get(did, "")
+        domain_names_list.append(name)
+        n_len = len(name)
+        domain_lens[i] = float(n_len)
+        if n_len > 0:
+            tld = extract_tld(name)
+            subdomain_counts[i] = float(name.count("."))
+            hyphen_counts[i] = float(name.count("-"))
+            digit_count = sum(c.isdigit() for c in name)
+            digit_ratios[i] = float(digit_count / n_len)
+            vowel_count = sum(c in vowels for c in name)
+            vowel_ratios[i] = float(vowel_count / n_len)
+            entropies[i] = calc_entropy(name)
+        else:
+            tld = ""
+        domain_tlds.append(tld)
+
+    train_tld_list = [domain_tlds[i] for i in train_indices_in_rel]
+    tld_counts = Counter(train_tld_list)
+    tld_tracker_sums = defaultdict(lambda: np.zeros(num_trackers, dtype=np.float32))
+    for idx_in_train, rel_idx in enumerate(train_indices_in_rel):
+        tld_tracker_sums[domain_tlds[rel_idx]] += y_train[idx_in_train]
+
+    global_base_rate = (y_train.sum(axis=0).astype(np.float32) + 1.0) / (
+        len(train_domain_ids) + num_trackers
+    )
+    alpha = 20.0
+
+    tld_prior_cache = {}
+    for tld, count in tld_counts.items():
+        tld_prior_cache[tld] = (
+            (tld_tracker_sums[tld] + alpha * global_base_rate) / (count + alpha)
+        ).astype(np.float32)
+
+    tld_tracker_prior = np.zeros((num_rel, num_trackers), dtype=np.float32)
+    for i, tld in enumerate(domain_tlds):
+        if tld in tld_prior_cache:
+            tld_tracker_prior[i] = tld_prior_cache[tld]
+        else:
+            tld_tracker_prior[i] = global_base_rate
+
+    # ---------------------------------------------------------
+    # 8. Collaborative Neighborhood Tracker Diffusion with Empirical Bayes Shrinkage
+    # ---------------------------------------------------------
+    print("Computing collaborative neighborhood tracker diffusion with Empirical Bayes shrinkage (mu=4.0)...")
+    if rel_src_list:
+        all_rel_src = np.concatenate(rel_src_list)
+        all_rel_dst = np.concatenate(rel_dst_list)
+        del rel_src_list, rel_dst_list
+        gc.collect()
+
+        non_self_mask = all_rel_src != all_rel_dst
+        all_rel_src = all_rel_src[non_self_mask]
+        all_rel_dst = all_rel_dst[non_self_mask]
+
+        adj_bin = csr_matrix(
+            (np.ones(len(all_rel_src), dtype=np.float32), (all_rel_src, all_rel_dst)),
+            shape=(num_rel, num_rel),
+        )
+        adj_bin.sum_duplicates()
+        adj_bin.data = np.clip(adj_bin.data, 0.0, 1.0)
+
+        # Inverse in-degree hub discounting for out-diffusion: edge (u, v) weighted by 1 / sqrt(log(2 + in_deg(v)))
+        w_ij = (1.0 / np.sqrt(np.log(2.0 + global_in_degree[adj_bin.indices]))).astype(np.float32)
+        adj_matrix = csr_matrix(
+            (w_ij, adj_bin.indices, adj_bin.indptr), shape=(num_rel, num_rel)
+        )
+
+        # Inverse out-degree hub discounting for reverse diffusion: edge (v, u) weighted by 1 / sqrt(log(2 + out_deg(u)))
+        adj_bin_rev = adj_bin.T.tocsr()
+        del adj_bin
+        w_rev_ji = (1.0 / np.sqrt(np.log(2.0 + global_out_degree[adj_bin_rev.indices]))).astype(np.float32)
+        adj_matrix_rev = csr_matrix(
+            (w_rev_ji, adj_bin_rev.indices, adj_bin_rev.indptr), shape=(num_rel, num_rel)
+        )
+        del adj_bin_rev
+    else:
+        adj_matrix = csr_matrix((num_rel, num_rel), dtype=np.float32)
+        adj_matrix_rev = csr_matrix((num_rel, num_rel), dtype=np.float32)
+
+    # Populated strictly for training domains
+    y_train_full = np.zeros((num_rel, num_trackers), dtype=np.float32)
+    y_train_full[train_indices_in_rel] = y_train.astype(np.float32)
+
+    is_train_domain_mask = np.zeros((num_rel, 1), dtype=np.float32)
+    is_train_domain_mask[train_indices_in_rel] = 1.0
+
+    out_tracker_sum = adj_matrix.dot(y_train_full)
+    out_train_counts = adj_matrix.dot(is_train_domain_mask)
+    out_tracker_dist = (
+        (out_tracker_sum + 4.0 * tld_tracker_prior) / (out_train_counts + 4.0)
+    ).astype(np.float32)
+
+    in_tracker_sum = adj_matrix_rev.dot(y_train_full)
+    in_train_counts = adj_matrix_rev.dot(is_train_domain_mask)
+    in_tracker_dist = (
+        (in_tracker_sum + 4.0 * tld_tracker_prior) / (in_train_counts + 4.0)
+    ).astype(np.float32)
+
+    subgraph_out_degree = np.array(adj_matrix.sum(axis=1)).flatten()
+    subgraph_in_degree = np.array(adj_matrix_rev.sum(axis=1)).flatten()
+
+    # Dedicated 2-hop collaborative community out-diffusion channel
+    out_2hop_sum = adj_matrix.dot(out_tracker_dist)
+    out_2hop_dist = (
+        out_2hop_sum / np.maximum(subgraph_out_degree[:, None], 1.0)
+    ).astype(np.float32)
+    del out_2hop_sum
+
+    del adj_matrix, adj_matrix_rev, y_train_full, out_tracker_sum, in_tracker_sum
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # 9. Freedom of the Press Score Integration
+    # ---------------------------------------------------------
+    press_df = pd.read_csv(
+        "input/freedom-of-the-press.csv", sep=r"\t|,", engine="python"
+    )
+    press_df.columns = [c.strip() for c in press_df.columns]
+    tld_c = [c for c in press_df.columns if "tld" in c.lower()][0]
+    score_c = [c for c in press_df.columns if "freedom" in c.lower()][0]
+
+    press_dict = dict(
+        zip(
+            press_df[tld_c].str.strip().str.lower(),
+            press_df[score_c].astype(np.float32),
+        )
+    )
+    median_press = float(np.median(list(press_dict.values())))
+
+    press_scores = np.zeros(num_rel, dtype=np.float32)
+    has_press = np.zeros(num_rel, dtype=np.float32)
+    for i, tld in enumerate(domain_tlds):
+        if tld in press_dict:
+            press_scores[i] = press_dict[tld]
+            has_press[i] = 1.0
+        else:
+            press_scores[i] = median_press
+            has_press[i] = 0.0
+
+    # ---------------------------------------------------------
+    # 10. URL Classification Category Integration
+    # ---------------------------------------------------------
+    url_cat_df = pd.read_csv(
+        "input/url-classification.csv", usecols=["url", "category"]
+    )
+    url_cat_df["host"] = url_cat_df["url"].apply(extract_host_from_url)
+    url_cat_df = url_cat_df[url_cat_df["host"].str.len() > 0]
+
+    target_hosts = set(url_cat_df["host"].unique())
+    host_to_rel_idx = {}
+    for i, name in enumerate(domain_names_list):
+        if name:
+            lname = name.lower()
+            if lname in target_hosts:
+                host_to_rel_idx[lname] = i
+
+    url_cat_df["rel_idx"] = url_cat_df["host"].map(host_to_rel_idx)
+    matched_cats = url_cat_df.dropna(subset=["rel_idx"]).copy()
+    matched_cats["rel_idx"] = matched_cats["rel_idx"].astype(np.int32)
+
+    all_cats = sorted(url_cat_df["category"].dropna().unique())
+    cat_to_col = {c: idx for idx, c in enumerate(all_cats)}
+    num_cats = len(all_cats)
+
+    url_category_features = np.zeros((num_rel, num_cats), dtype=np.float32)
+    has_url_category = np.zeros(num_rel, dtype=np.float32)
+
+    if len(matched_cats) > 0:
+        for rel_idx, cat in zip(matched_cats["rel_idx"], matched_cats["category"]):
+            if cat in cat_to_col:
+                url_category_features[rel_idx, cat_to_col[cat]] += 1.0
+                has_url_category[rel_idx] = 1.0
+
+        row_sums = url_category_features.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1.0
+        url_category_features = (url_category_features / row_sums).astype(np.float32)
+
+    del url_cat_df, matched_cats
+    gc.collect()
+
+    # Construct Bayesian-smoothed Content-Category Tracker Prior (Channel 5)
+    print("Constructing Bayesian smoothed Content-Category tracker priors...")
+    alpha_cat = 15.0
+    matched_train_mask = has_url_category[train_indices_in_rel] > 0
+    cat_tracker_sums = np.zeros((num_cats, num_trackers), dtype=np.float32)
+    cat_domain_counts = np.zeros(num_cats, dtype=np.float32)
+
+    if np.any(matched_train_mask):
+        sub_feats = url_category_features[train_indices_in_rel][matched_train_mask]
+        sub_y = y_train[matched_train_mask].astype(np.float32)
+        cat_tracker_sums = sub_feats.T @ sub_y
+        cat_domain_counts = sub_feats.sum(axis=0)
+
+    cat_tracker_prior_matrix = (
+        (cat_tracker_sums + alpha_cat * global_base_rate[None, :])
+        / (cat_domain_counts[:, None] + alpha_cat)
+    ).astype(np.float32)
+
+    category_tracker_prior = np.tile(global_base_rate, (num_rel, 1)).astype(np.float32)
+    matched_rel_mask = has_url_category > 0
+    if np.any(matched_rel_mask):
+        category_tracker_prior[matched_rel_mask] = (
+            url_category_features[matched_rel_mask] @ cat_tracker_prior_matrix
+        ).astype(np.float32)
+    del cat_tracker_sums, cat_domain_counts, cat_tracker_prior_matrix
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # 11. Subword Character N-Gram TF-IDF (Fit ONLY on Train)
+    # ---------------------------------------------------------
+    print("Fitting lexical subword TF-IDF representations on root domain bodies...")
+    tfidf_vectorizer = TfidfVectorizer(
+        analyzer="char_wb",
+        ngram_range=(3, 5),
+        max_features=384,
+        sublinear_tf=True,
+    )
+
+    # Extract root domain body (stripping 'www.' prefix and TLD suffixes)
+    clean_domain_bodies = [extract_root_domain_body(name) for name in domain_names_list]
+
+    val_indices_in_rel = id_to_idx[val_domain_ids]
+    test_indices_in_rel = id_to_idx[test_domain_ids]
+
+    train_names = [clean_domain_bodies[i] for i in train_indices_in_rel]
+    val_names = [clean_domain_bodies[i] for i in val_indices_in_rel]
+    test_names = [clean_domain_bodies[i] for i in test_indices_in_rel]
+
+    tfidf_vectorizer.fit(train_names[:500000])
+
+    tfidf_train = tfidf_vectorizer.transform(train_names).astype(np.float32).toarray()
+    tfidf_val = tfidf_vectorizer.transform(val_names).astype(np.float32).toarray()
+    tfidf_test = tfidf_vectorizer.transform(test_names).astype(np.float32).toarray()
+
+    # ---------------------------------------------------------
+    # 12. Dense Tabular Block Assembly & Standard Scaling
+    # ---------------------------------------------------------
+    tabular_raw = np.column_stack(
+        [
+            np.log1p(global_out_degree),
+            np.log1p(global_in_degree),
+            (global_in_degree + 1.0) / (global_out_degree + 1.0),
+            np.log1p(subgraph_out_degree),
+            np.log1p(subgraph_in_degree),
+            np.log1p(tracker_link_counts),
+            np.log1p(out_train_counts.flatten()),
+            np.log1p(in_train_counts.flatten()),
+            domain_lens,
+            subdomain_counts,
+            hyphen_counts,
+            digit_ratios,
+            vowel_ratios,
+            entropies,
+            press_scores,
+            has_press,
+            has_url_category,
+            url_category_features,
+        ]
+    ).astype(np.float32)
+
+    scaler = StandardScaler()
+    scaler.fit(tabular_raw[train_indices_in_rel])
+
+    tabular_train = scaler.transform(tabular_raw[train_indices_in_rel]).astype(
+        np.float32
+    )
+    tabular_val = scaler.transform(tabular_raw[val_indices_in_rel]).astype(np.float32)
+    tabular_test = scaler.transform(tabular_raw[test_indices_in_rel]).astype(np.float32)
+
+    del tabular_raw
+    gc.collect()
+
+    # ---------------------------------------------------------
+    # 13. Assemble Final Multi-Modal Feature Matrices
+    # ---------------------------------------------------------
+    print("Assembling final feature matrices...")
+    num_tracker_channels = 6
+    tracker_feature_dim = num_trackers * num_tracker_channels
+    context_feature_dim = tfidf_train.shape[1] + tabular_train.shape[1]
+    num_features = tracker_feature_dim + context_feature_dim
+
+    X_train = np.empty((len(train_indices_in_rel), num_features), dtype=np.float32)
+    X_val = np.empty((len(val_indices_in_rel), num_features), dtype=np.float32)
+    X_test = np.empty((len(test_indices_in_rel), num_features), dtype=np.float32)
+
+    col = 0
+    # Channel 0: direct_tracker_links
+    X_train[:, col : col + num_trackers] = direct_tracker_links[train_indices_in_rel]
+    X_val[:, col : col + num_trackers] = direct_tracker_links[val_indices_in_rel]
+    X_test[:, col : col + num_trackers] = direct_tracker_links[test_indices_in_rel]
+    col += num_trackers
+    del direct_tracker_links
+    gc.collect()
+
+    # Channel 1: out_tracker_dist (1-hop collaborative diffusion)
+    X_train[:, col : col + num_trackers] = out_tracker_dist[train_indices_in_rel]
+    X_val[:, col : col + num_trackers] = out_tracker_dist[val_indices_in_rel]
+    X_test[:, col : col + num_trackers] = out_tracker_dist[test_indices_in_rel]
+    col += num_trackers
+    del out_tracker_dist
+    gc.collect()
+
+    # Channel 2: out_2hop_dist (2-hop community out-diffusion)
+    X_train[:, col : col + num_trackers] = out_2hop_dist[train_indices_in_rel]
+    X_val[:, col : col + num_trackers] = out_2hop_dist[val_indices_in_rel]
+    X_test[:, col : col + num_trackers] = out_2hop_dist[test_indices_in_rel]
+    col += num_trackers
+    del out_2hop_dist
+    gc.collect()
+
+    # Channel 3: in_tracker_dist (collaborative in-diffusion)
+    X_train[:, col : col + num_trackers] = in_tracker_dist[train_indices_in_rel]
+    X_val[:, col : col + num_trackers] = in_tracker_dist[val_indices_in_rel]
+    X_test[:, col : col + num_trackers] = in_tracker_dist[test_indices_in_rel]
+    col += num_trackers
+    del in_tracker_dist
+    gc.collect()
+
+    # Channel 4: tld_tracker_prior (Bayesian smoothed TLD regional prior)
+    X_train[:, col : col + num_trackers] = tld_tracker_prior[train_indices_in_rel]
+    X_val[:, col : col + num_trackers] = tld_tracker_prior[val_indices_in_rel]
+    X_test[:, col : col + num_trackers] = tld_tracker_prior[test_indices_in_rel]
+    col += num_trackers
+    del tld_tracker_prior
+    gc.collect()
+
+    # Channel 5: category_tracker_prior (Bayesian smoothed Content-Category prior)
+    X_train[:, col : col + num_trackers] = category_tracker_prior[train_indices_in_rel]
+    X_val[:, col : col + num_trackers] = category_tracker_prior[val_indices_in_rel]
+    X_test[:, col : col + num_trackers] = category_tracker_prior[test_indices_in_rel]
+    col += num_trackers
+    del category_tracker_prior
+    gc.collect()
+
+    # Context block: Subword char TF-IDF (384 features)
+    n_tfidf = tfidf_train.shape[1]
+    X_train[:, col : col + n_tfidf] = tfidf_train
+    X_val[:, col : col + n_tfidf] = tfidf_val
+    X_test[:, col : col + n_tfidf] = tfidf_test
+    col += n_tfidf
+    del tfidf_train, tfidf_val, tfidf_test
+    gc.collect()
+
+    # Context block: Dense Tabular (32 features)
+    n_tab = tabular_train.shape[1]
+    X_train[:, col : col + n_tab] = tabular_train
+    X_val[:, col : col + n_tab] = tabular_val
+    X_test[:, col : col + n_tab] = tabular_test
+    col += n_tab
+    del tabular_train, tabular_val, tabular_test
+    gc.collect()
+
+    np.nan_to_num(X_train, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    np.nan_to_num(X_val, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    np.nan_to_num(X_test, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+
+    context_dim = num_features - (num_trackers * num_tracker_channels)
+
+    print(
+        f"Feature dimensions -> Train: {X_train.shape}, Val: {X_val.shape}, Test:"
+        f" {X_test.shape}"
+    )
+    print(f"Context feature dimension: {context_dim}")
+
+    # ---------------------------------------------------------
+    # 13b. Compute Empirical Co-occurrence Topology & Prior Log-Odds
+    # ---------------------------------------------------------
+    print("Computing empirical conditional co-occurrence and PPMI priors from y_train...")
+    C_cooccur = np.zeros((num_trackers, num_trackers), dtype=np.float64)
+    chunk_size = 500000
+    for i_chunk in range(0, len(y_train), chunk_size):
+        sub_y = y_train[i_chunk : i_chunk + chunk_size].astype(np.float32)
+        C_cooccur += sub_y.T @ sub_y
+
+    N_train = float(len(y_train))
+    diag_C = np.diag(C_cooccur).copy()
+    eps = 1e-7
+
+    # Empirical Conditional Co-occurrence P(T_j | T_i) = C_ij / N_i
+    C_offdiag = C_cooccur.copy()
+    np.fill_diagonal(C_offdiag, 0.0)
+    P_cond = (C_offdiag / (diag_C[:, None] + eps)).astype(np.float32)
+
+    # Row-normalized Positive Pointwise Mutual Information (PPMI)
+    outer_N = np.outer(diag_C, diag_C)
+    valid_mask = (C_offdiag > 0) & (outer_N > 0)
+    ppmi = np.zeros((num_trackers, num_trackers), dtype=np.float32)
+    pmi_val = np.log((C_offdiag[valid_mask] * N_train) / (outer_N[valid_mask] + eps))
+    ppmi[valid_mask] = np.maximum(0.0, pmi_val)
+    np.fill_diagonal(ppmi, 0.0)
+    ppmi_row_sums = ppmi.sum(axis=1, keepdims=True)
+    P_ppmi = np.where(ppmi_row_sums > 0, ppmi / np.maximum(ppmi_row_sums, eps), 0.0).astype(np.float32)
+
+    p_marginal = diag_C / N_train
+    eps_prior = 1e-5
+    prior_log_odds = np.log((p_marginal + eps_prior) / (1.0 - p_marginal + eps_prior)).astype(np.float32)
+    del C_cooccur
+
+    # ---------------------------------------------------------
+    # 14. Setup PyTorch DataLoaders & Architecture
+    # ---------------------------------------------------------
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Executing on compute device: {device}")
+
+    # Chunk-buffered fast batch loader to optimize CPU cache locality
+    class FastBatchLoader:
+        def __init__(self, X, y=None, batch_size=4096, shuffle=True, drop_last=False):
+            self.X = torch.from_numpy(X) if isinstance(X, np.ndarray) else X
+            self.y = (
+                torch.from_numpy(y)
+                if (isinstance(y, np.ndarray) and y is not None)
+                else y
+            )
+            self.batch_size = batch_size
+            self.shuffle = shuffle
+            self.drop_last = drop_last
+            self.n_samples = len(self.X)
+
+        def __iter__(self):
+            if self.shuffle:
+                chunk_size = 65536
+                num_chunks = (self.n_samples + chunk_size - 1) // chunk_size
+                chunk_order = torch.randperm(num_chunks)
+                indices = torch.empty(self.n_samples, dtype=torch.long)
+                curr = 0
+                for c in chunk_order:
+                    start = c.item() * chunk_size
+                    end = min(start + chunk_size, self.n_samples)
+                    chunk_len = end - start
+                    perm = torch.randperm(chunk_len)
+                    indices[curr : curr + chunk_len] = torch.arange(start, end)[perm]
+                    curr += chunk_len
+            else:
+                indices = torch.arange(self.n_samples)
+
+            for i in range(0, self.n_samples, self.batch_size):
+                if self.drop_last and (i + self.batch_size > self.n_samples):
+                    break
+                batch_idx = indices[i : i + self.batch_size]
+                bx = self.X[batch_idx]
+                if self.y is not None:
+                    by = self.y[batch_idx]
+                    yield bx, by
+                else:
+                    yield bx, None
+
+        def __len__(self):
+            if self.drop_last:
+                return self.n_samples // self.batch_size
+            return (self.n_samples + self.batch_size - 1) // self.batch_size
+
+    batch_size = 16384
+
+    train_loader = FastBatchLoader(
+        X_train, y_train, batch_size=batch_size, shuffle=True, drop_last=True
+    )
+    val_loader = FastBatchLoader(
+        X_val, y_val.astype(np.float32), batch_size=batch_size * 2, shuffle=False, drop_last=False
+    )
+    test_loader = FastBatchLoader(
+        X_test, None, batch_size=batch_size * 2, shuffle=False, drop_last=False
+    )
+
+    model = TrackerSyndicateNet(
+        num_trackers=num_trackers,
+        num_tracker_channels=num_tracker_channels,
+        context_dim=context_dim,
+        d_model=128,
+        n_heads=4,
+        context_hidden_dim=512,
+        dropout_rate=0.10,
+        cond_cooccur_matrix=P_cond,
+        ppmi_matrix=P_ppmi,
+        prior_log_odds=prior_log_odds,
+    ).to(device)
+
+    criterion = SmoothRecall10Loss(
+        tau=0.5,
+        beta=1.0,
+        bce_weight=0.10,
+        pos_weight=5.0,
+        top_k_neg=30,
+        focal_gamma=1.5,
+        huber_delta=2.0,
+    ).to(device)
+
+    epochs = 6
+    peak_lr = 2.0e-3
+    optimizer = torch.optim.AdamW(model.parameters(), lr=peak_lr, weight_decay=1e-4)
+    warmup_steps = 500
+    total_steps = epochs * len(train_loader)
+
+    def lr_lambda(current_step: int):
+        if current_step < warmup_steps:
+            return float(current_step + 1) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(1e-5 / peak_lr, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
+    ema = ModelEMA(model, decay=0.999)
+
+    # ---------------------------------------------------------
+    # 15. Training & Hold-out Metric Evaluation with EMA
+    # ---------------------------------------------------------
+    best_val_recall = -1.0
+    best_epoch = "None"
+    checkpoint_path = "./working/best_tracker_model.pt"
+    MAX_TOTAL_RUNTIME = 50 * 60  # 50-min global timeout guard (hard limit 60m)
+
+    for epoch in range(epochs):
+        elapsed_global = time.time() - global_start_time
+        if elapsed_global > MAX_TOTAL_RUNTIME:
+            print(
+                f"Global time guard triggered before epoch {epoch+1} ({elapsed_global:.1f}s elapsed). Stopping training gracefully."
+            )
+            break
+
+        model.train()
+        total_train_loss = 0.0
+        num_train_batches = 0
+        time_to_stop = False
+
+        for batch_idx, (batch_x, batch_y) in enumerate(train_loader):
+            batch_x = batch_x.to(device, non_blocking=True)
+            batch_y = batch_y.to(device, non_blocking=True).float()
+
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                logits = model(batch_x)
+                loss = criterion(logits, batch_y)
+
+            if not torch.isfinite(loss):
+                print(f"Warning: Non-finite loss encountered at batch {batch_idx}. Skipping step.")
+                continue
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if torch.isfinite(grad_norm):
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                ema.update(model)
+            else:
+                scaler.update()
+
+            total_train_loss += loss.item()
+            num_train_batches += 1
+
+            if batch_idx % 250 == 0:
+                if (time.time() - global_start_time) > MAX_TOTAL_RUNTIME:
+                    print(
+                        f"Time guard triggered at batch {batch_idx}/{len(train_loader)}. Finishing current epoch safely."
+                    )
+                    time_to_stop = True
+                    break
+
+        avg_train_loss = total_train_loss / max(num_train_batches, 1)
+
+        # Validation Evaluation for standard online model
+        model.eval()
+        val_logits_list = []
+        val_targets_list = []
+
+        with torch.no_grad():
+            for batch_x, batch_y in val_loader:
+                batch_x = batch_x.to(device, non_blocking=True)
+                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                    logits = model(batch_x)
+                val_logits_list.append(logits.float().cpu())
+                val_targets_list.append(batch_y.float())
+
+        all_val_logits = torch.cat(val_logits_list, dim=0)
+        all_val_targets = torch.cat(val_targets_list, dim=0)
+        val_recall = compute_recall_at_10(all_val_logits, all_val_targets)
+
+        current_lr = scheduler.get_last_lr()[0]
+        print(
+            f"Epoch {epoch+1:02d}/{epochs:02d} - Loss: {avg_train_loss:.4f} -"
+            f" Val Recall@10: {val_recall:.6f} - LR: {current_lr:.6f}"
+        )
+
+        if val_recall > best_val_recall:
+            best_val_recall = val_recall
+            best_epoch = f"Online-E{epoch+1}"
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "val_recall": val_recall,
+                },
+                checkpoint_path,
+            )
+
+        # Validation Evaluation for EMA model
+        backup = ema.apply_shadow(model)
+        model.eval()
+        ema_val_logits_list = []
+        with torch.no_grad():
+            for batch_x, _ in val_loader:
+                batch_x = batch_x.to(device, non_blocking=True)
+                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                    logits = model(batch_x)
+                ema_val_logits_list.append(logits.float().cpu())
+
+        ema_val_logits = torch.cat(ema_val_logits_list, dim=0)
+        ema_val_recall = compute_recall_at_10(ema_val_logits, all_val_targets)
+        print(
+            f"Epoch {epoch+1:02d}/{epochs:02d} [EMA decay=0.999] - "
+            f"Val Recall@10: {ema_val_recall:.6f}"
+        )
+
+        if ema_val_recall > best_val_recall:
+            best_val_recall = ema_val_recall
+            best_epoch = f"EMA-E{epoch+1}"
+            torch.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "val_recall": ema_val_recall,
+                },
+                checkpoint_path,
+            )
+
+        ema.restore(model, backup)
+
+        if time_to_stop:
+            break
+
+    print(
+        f"Training completed. Optimal checkpoint at Epoch {best_epoch} with Val"
+        f" Recall@10: {best_val_recall:.6f}"
+    )
+
+    # ---------------------------------------------------------
+    # 16. Load Optimal Checkpoint & Final Validation Assessment
+    # ---------------------------------------------------------
+    del train_loader, X_train, y_train
+    gc.collect()
+
+    if os.path.exists(checkpoint_path):
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        except TypeError:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    val_logits_list = []
+    val_targets_list = []
+    with torch.no_grad():
+        for batch_x, batch_y in val_loader:
+            batch_x = batch_x.to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                logits = model(batch_x)
+            val_logits_list.append(logits.float().cpu())
+            val_targets_list.append(batch_y.float())
+
+    final_val_logits = torch.cat(val_logits_list, dim=0)
+    final_val_targets = torch.cat(val_targets_list, dim=0)
+    final_val_score = compute_recall_at_10(final_val_logits, final_val_targets)
+
+    # ---------------------------------------------------------
+    # 17. Test Inference & Submission Generation
+    # ---------------------------------------------------------
+    print("Performing inference on all test domains...")
+    test_logits_list = []
+    with torch.no_grad():
+        for batch_x, _ in test_loader:
+            batch_x = batch_x.to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                logits = model(batch_x)
+            test_logits_list.append(logits.float().cpu())
+
+    all_test_logits = torch.cat(test_logits_list, dim=0)
+    top10_test_tids = (
+        torch.topk(all_test_logits, k=10, dim=1).indices.numpy().astype(np.int32)
+    )
+
+    top10_test_tracking_dids = tracker_id_to_domain_id[top10_test_tids]
+
+    repeated_domain_ids = np.repeat(test_domain_ids, 10)
+    flat_tracking_domain_ids = top10_test_tracking_dids.flatten()
+
+    submission_df = pd.DataFrame(
+        {
+            "domain_id": repeated_domain_ids,
+            "tracking_domain_id": flat_tracking_domain_ids,
+        }
+    )
+
+    submission_file = "./submission/submission.csv"
+    submission_tsv = "./submission/submission.tsv"
+
+    submission_df.to_csv(submission_file, sep="\t", index=False)
+    submission_df.to_csv(submission_tsv, sep="\t", index=False)
+
+    print(f"Submission generated successfully with shape: {submission_df.shape}")
+    print(f"Unique test domains submitted: {submission_df['domain_id'].nunique()}")
+
+    print(f"Final Validation Score: {final_val_score:.6f}")
+
+
+if __name__ == "__main__":
+    main()
