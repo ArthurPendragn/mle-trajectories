@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getCorpus } from "@/lib/dal";
+import { getCorpus, getJobs } from "@/lib/dal";
 import { dataLabel, fmtScore, metricLabel, shortCommit } from "@/lib/format";
 import type { DatasetInfo, RunSummary } from "@/lib/types";
 import { StaleHint } from "@/components/stale-hint";
@@ -47,7 +47,7 @@ function Runtime({ run, current }: { run: RunSummary; current: string | null }) 
 }
 
 export default async function CorpusPage() {
-  const corpus = await getCorpus();
+  const [corpus, jobs] = await Promise.all([getCorpus(), getJobs(20)]);
   const runs = corpus.datasets.flatMap((d) => d.runs);
   const steps = runs.reduce((n, r) => n + r.n_steps, 0);
   return (
@@ -55,7 +55,10 @@ export default async function CorpusPage() {
       <h1>Corpus</h1>
       <p className="muted">
         {corpus.datasets.length} datasets · {runs.length} runs · {steps} steps ·
-        stratum {shortCommit(corpus.stratum_commit)}
+        stratum {shortCommit(corpus.stratum_commit)} ·{" "}
+        <Link href="/jobs">
+          {jobs.n_live > 0 ? `${jobs.n_live} job${jobs.n_live > 1 ? "s" : ""} running` : "jobs"}
+        </Link>
       </p>
       {corpus.datasets.map((ds) => (
         <section key={ds.name} className="dataset">

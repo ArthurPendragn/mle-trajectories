@@ -243,8 +243,10 @@ def sample_start(dataset: str, run: str, params: dict = Body(...)) -> dict:
 
 
 @app.get("/api/jobs")
-def jobs_list() -> dict:
-    return {"jobs": actions.jobs_for(limit=20)}
+def jobs_list(limit: int = 100) -> dict:
+    """Every job on the node, newest first (the jobs overview page)."""
+    jobs = actions.jobs_for(limit=max(1, min(limit, 500)))
+    return {"jobs": jobs, "n_live": sum(j["state"] in ("running", "starting") for j in jobs)}
 
 
 @app.get("/api/jobs/{job_id}")

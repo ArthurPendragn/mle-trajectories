@@ -10,6 +10,7 @@ export default async function MainLayout({ children }: { children: React.ReactNo
         <Link href="/" className="brand">MLE trajectories</Link>
         <nav>
           <Link href="/">Corpus</Link>
+          <Link href="/jobs">Jobs</Link>
         </nav>
         <form action={logout} className="logout">
           <span className="muted">{session.user}</span>

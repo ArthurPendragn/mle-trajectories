@@ -27,7 +27,7 @@ website/
                         tools/pipeline_analyzer/explorer.js)
         components/actions/   the actions panel: sample and sweep forms, job cards
         components/     search tree + analyses, runtime profile, source pickers
-        app/(main)/     corpus page, run page
+        app/(main)/     corpus page, run page, jobs page
         app/login/      login form
 ```
 
@@ -202,6 +202,10 @@ detached (it survives an API reload) with its state in
 progress and log, and re-renders when it ends. **stop** takes down the whole
 process tree. The frontend sends parameters only; `backend/actions.py` builds
 and validates every command from the registry.
+
+The **Jobs** page (top bar, or the job count on the corpus page) lists every
+job on the node, newest first, filterable by state and action, with progress,
+duration, a stop button and the log one click away.
 
 ### Build sample
 

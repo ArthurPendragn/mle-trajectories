@@ -248,3 +248,5 @@ export type ActionsInfo = {
   jobs: Job[];
   busy: { id: string; run: string; label: string } | null;   // a sweep running anywhere
 };
+
+export type JobList = { jobs: Job[]; n_live: number };

@@ -204,3 +204,14 @@ tr:target td { background: var(--best); }
 .badge.state-failed, .badge.state-lost { color: var(--down); }
 .badge .spinner { width: 8px; height: 8px; border-width: 1.5px; }
 .sweep-cap button.on { border-color: var(--accent); color: var(--accent); }
+
+/* jobs overview */
+.tree-modes select { font: inherit; font-size: 12px; margin-left: 4px; }
+table.jobs tr.job-row { cursor: pointer; }
+table.jobs tr.job-row:hover td { background: var(--badge); }
+table.jobs tr.job-log td { background: var(--bg); }
+table.jobs progress { width: 90px; vertical-align: middle; }
+table.jobs button {
+  font: inherit; font-size: 12px; cursor: pointer; background: var(--badge); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 1px 8px;
+}
