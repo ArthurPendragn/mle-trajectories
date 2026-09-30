@@ -48,6 +48,9 @@ def main(argv=None) -> None:
     print(f"API on unix socket {sock}", file=sys.stderr)
     uvicorn.run("website.backend.app:app", uds=str(sock), reload=args.reload,
                 reload_dirs=[str(Path(__file__).parent)] if args.reload else None,
+                # the frontend's keep-alive connections would otherwise hold a
+                # graceful shutdown open indefinitely (seen: SIGTERM ignored)
+                timeout_graceful_shutdown=3,
                 log_level="info")
 
 

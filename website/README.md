@@ -171,6 +171,26 @@ The worker turns off skrub's per-DataOp creation-stack recording (only used
 for "defined here" in error messages): it was ~80% of plan-building time, and
 the extracted DAGs are byte-identical without it.
 
+## Operator explorer: grouping
+
+Before layout, every connected region of operations carried by the same ticked
+pipelines collapses into one stacked box ("12 operations · Numeric ×4 ·
+Drop ×2"), recomputed on every selection change. Click a box to expand it;
+click one of its operations to collapse it again from the inspector; "expand
+all" / "collapse all"; "group" turns it off. Estimators stay visible and split
+the regions around them unless "estimators too" is ticked. On the nyc run, all
+32 pipelines' 1364 operations draw as 131 boxes.
+
+The collapsed graph is always acyclic. An operation's inputs belong to every
+pipeline the operation belongs to, so pipeline sets only shrink along a path,
+and a path leaving a region and re-entering it can only pass through operations
+of that same region. Estimators kept visible would break this, so regions are
+also cut at each estimator (keyed by the estimators upstream of them).
+`contract()` in `components/explorer/engine.js` is the pure core. It throws
+rather than drawing a cycle, and was property-tested on the cached analyses:
+2242 random selections, diff pairs and expand states, with no cycle, no mixed
+pipeline set and no disconnected group.
+
 ## Adding an analysis or action
 
 1. For an action, declare it in `frontend/lib/capabilities.ts` with its

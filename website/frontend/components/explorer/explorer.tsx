@@ -59,7 +59,19 @@ export const Explorer = forwardRef<ExplorerHandle, {
           <button data-pa="zout" title="zoom out">−</button>
           <button data-pa="fit">reset view</button>
           <button data-pa="full" title="give the graph the whole window (Esc to leave)">full screen</button>
-          <span className="muted">scroll to zoom, drag to pan, click an operation for its pipelines</span>
+          <label title="draw the data sources at the top instead of the bottom">
+            <input type="checkbox" data-pa="sources-top" /> sources on top
+          </label>
+          <span className="pa-sep" />
+          <label title="collapse every connected region of operations carried by the same ticked pipelines">
+            <input type="checkbox" data-pa="grouping" defaultChecked /> group
+          </label>
+          <label title="by default estimators stay visible and split the groups around them">
+            <input type="checkbox" data-pa="collapse-est" /> estimators too
+          </label>
+          <button data-pa="expand">expand all</button>
+          <button data-pa="collapse">collapse all</button>
+          <span className="muted">scroll to zoom, drag to pan, click an operation for its pipelines, a group to expand it</span>
           <span data-pa="modehint" />
         </div>
         <div className="legend" data-pa="legend" />

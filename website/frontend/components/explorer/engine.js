@@ -14,6 +14,11 @@
  * generation time: a fixed graphviz layout of the full union would leave a
  * selection of three pipelines scattered across a page-sized canvas.
  *
+ * Grouping: before layout, every connected region of operations carried by the
+ * same ticked pipelines collapses into one box (see ``buildView``), which is
+ * what keeps a union DAG of hundreds of operations legible. A box expands on
+ * click; the inspector collapses it again.
+ *
  * Layout is a small layered (Sugiyama) pipeline: longest-path layering, tightened
  * so every node sits just above its earliest child; dummy nodes for edges that
  * span more than one layer; barycenter ordering sweeps keeping the crossing-
@@ -52,6 +57,12 @@ export function createExplorer(root, D, hooks) {
   var picked = -1;         // node id shown in the inspector
   var inspectOpen = null;  // remembered <details> state of the inspector
   var view = { k: 1, x: 0, y: 0 };
+  var grouping = true;         // collapse same-membership regions
+  var collapseEst = false;     // let estimators collapse into regions too
+  var bottomUp = true;         // sources at the bottom, as query plans are drawn
+  var expanded = new Set();    // top node id of every group the reader expanded
+  var groupOf = {};            // visible node id -> its group (size >= 2), per draw
+  var groupByVid = {};         // virtual item id -> group, per draw
 
   // ---- palette -------------------------------------------------------------
   var GRAY = ["#eceff3", "#9aa4b2"];
@@ -126,21 +137,22 @@ export function createExplorer(root, D, hooks) {
              h: lines.length * LH + 2 * PADY };
   }
 
-  /* Layered layout of ``ids`` (a topologically ordered subset of the union). */
-  function layout(ids) {
-    var vis = new Set(ids), i, l;
+  /* Layered layout of the view graph ``G`` (``buildView``): ``G.ids`` in
+   * topological order, ``G.inp`` / ``G.kids`` its edges, ``G.lines`` labels. */
+  function layout(G) {
+    var ids = G.ids, i, l;
 
     // 1. layering: longest path from a source, then tightened downward so each
     //    node sits directly above its earliest child (fewer, shorter edges).
     var layer = {};
     ids.forEach(function (id) {
       var mx = -1;
-      N[id].i.forEach(function (u) { if (vis.has(u)) mx = Math.max(mx, layer[u]); });
+      G.inp[id].forEach(function (u) { mx = Math.max(mx, layer[u]); });
       layer[id] = mx + 1;
     });
     for (i = ids.length - 1; i >= 0; i--) {
       var id = ids[i], mn = Infinity;
-      kidsOf[id].forEach(function (v) { if (vis.has(v)) mn = Math.min(mn, layer[v]); });
+      G.kids[id].forEach(function (v) { mn = Math.min(mn, layer[v]); });
       if (mn !== Infinity) layer[id] = mn - 1;
     }
 
@@ -152,15 +164,14 @@ export function createExplorer(root, D, hooks) {
     // 2. items: one per visible node, plus a dummy per layer an edge crosses.
     var items = [], itemOf = {};
     ids.forEach(function (id) {
-      var lines = wrap(N[id].l), m = measure(lines);
+      var lines = G.lines[id], m = measure(lines);
       var it = { idx: items.length, node: id, l: layer[id], w: m.w, h: m.h,
                  lines: lines, up: [], down: [] };
       items.push(it); itemOf[id] = it; L[it.l].push(it);
     });
     var edges = [], segs = [];
     ids.forEach(function (v) {
-      N[v].i.forEach(function (u) {
-        if (!vis.has(u)) return;
+      G.inp[v].forEach(function (u) {
         var prev = itemOf[u], chain = [];
         for (var lv = layer[u] + 1; lv < layer[v]; lv++) {
           var d = { idx: items.length, node: -1, l: lv, w: 1, h: 1, up: [], down: [] };
@@ -302,6 +313,56 @@ export function createExplorer(root, D, hooks) {
     return { ids: ids, pair: pair };
   }
 
+  /* Pipelines carrying an operation, reduced to a key comparable along edges.
+   * In the merged DAG an operation's inputs belong to every pipeline the
+   * operation belongs to (they are part of its signature), so along an edge the
+   * set can only shrink: equal counts across an edge mean equal sets. */
+  function memberKey(id, pair) {
+    if (pair) {
+      return (memberSet[id].has(pair.child) ? 1 : 0) + (memberSet[id].has(pair.parent) ? 2 : 0);
+    }
+    var k = 0;
+    sel.forEach(function (pi) { if (memberSet[id].has(pi)) k++; });
+    return k;
+  }
+
+  /* The graph layout() draws: ``contract`` (below) plus labels. */
+  function buildView(ids, pair) {
+    var r = contract(N, ids, function (id) { return memberKey(id, pair); },
+                     function (id) { return !collapseEst && !!N[id].e; },
+                     grouping, expanded);
+    groupOf = r.groupOf; groupByVid = r.groupByVid;
+    var G = r.G;
+    G.ids.forEach(function (it) {
+      G.lines[it] = it < N.length ? wrap(N[it].l) : groupLines(groupByVid[it]);
+    });
+    return G;
+  }
+
+  function groupLines(g) {
+    var types = {};
+    g.members.forEach(function (id) { types[N[id].t] = (types[N[id].t] || 0) + 1; });
+    var top = Object.keys(types).sort(function (a, b) { return types[b] - types[a]; })
+      .slice(0, 2).map(function (t) { return t.replace(/Op$/, "") + " ×" + types[t]; });
+    return ["⊞ " + g.members.length + " operations"].concat(top);
+  }
+
+  /* The node a view item stands for: itself, or its group's top node. */
+  function repOf(item) { return item < N.length ? item : groupByVid[item].top; }
+
+  function colorForItem(item, pair) {
+    if (item < N.length) return colorFor(item, pair);
+    var g = groupByVid[item];
+    // child-only region in diff mode: "new" if any member is a genuinely new op
+    if (pair && g.key === 1) {
+      var fresh = g.members.some(function (id) {
+        return N[id].i.every(function (u) { return memberSet[u].has(pair.parent); });
+      });
+      return fresh ? DIFF.frontier : DIFF.bubbled;
+    }
+    return colorFor(g.top, pair);
+  }
+
   function colorFor(id, pair) {
     var n = N[id];
     if (pair) {
@@ -346,7 +407,10 @@ export function createExplorer(root, D, hooks) {
     identColors();
     var v = visibleIds(), ids = v.ids, pair = v.pair;
     var t0 = performance.now();
-    var laid = layout(ids);
+    var G = buildView(ids, pair);
+    var laid = layout(G);
+    // layout() puts sources on top; mirror it for the query-plan orientation
+    if (bottomUp) laid.items.forEach(function (it) { it.y = laid.h - it.y; });
     var ms = performance.now() - t0;
 
     var parts = [];
@@ -369,17 +433,20 @@ export function createExplorer(root, D, hooks) {
 
     laid.edges.forEach(function (e) {
       var a = laid.itemOf[e.u], b = laid.itemOf[e.v];
-      var pts = [{ x: a.x, y: a.y + a.h / 2 }];
+      // edges leave the side facing the consumer: the top when drawn bottom-up
+      var s = bottomUp ? -1 : 1;
+      var pts = [{ x: a.x, y: a.y + s * a.h / 2 }];
       e.chain.forEach(function (d) { pts.push({ x: d.x, y: d.y }); });
-      pts.push({ x: b.x, y: b.y - b.h / 2 });
+      pts.push({ x: b.x, y: b.y - s * b.h / 2 });
       var cls = "pa-e";
-      if (pair && !memberSet[e.v].has(pair.child)) cls += " gone";
+      if (pair && !memberSet[repOf(e.v)].has(pair.child)) cls += " gone";
       parts.push('<path class="' + cls + '" d="' + edgePath(pts) +
                  '" marker-end="url(#pa-arrow)"/>');
     });
 
     laid.items.forEach(function (it) {
       if (it.node < 0) return;
+      if (it.node >= N.length) { parts.push(groupSvg(it, pair)); return; }
       var n = N[it.node], c = colorFor(it.node, pair);
       var stroke = n.e ? EST_BORDER : c[1];
       var x = it.x - it.w / 2, y = it.y - it.h / 2;
@@ -421,7 +488,10 @@ export function createExplorer(root, D, hooks) {
       if (k === sel.size && sel.size > 1) shared++;
       if (k === 1 && sel.size > 1) unique++;
     });
-    var bits = [ids.length + " operations"];
+    var nGroups = G.ids.filter(function (it) { return it >= N.length; }).length;
+    var bits = [ids.length + " operations" + (nGroups ?
+      " in " + G.ids.length + " boxes (" + nGroups + " collapsed group" +
+      (nGroups > 1 ? "s" : "") + ")" : "")];
     if (sel.size > 1) {
       bits.push(shared + " in all " + sel.size);
       bits.push(unique + " in only one");
@@ -435,6 +505,29 @@ export function createExplorer(root, D, hooks) {
     else if (mode === "pipe" && sel.size > IDENT.length)
       hint = sel.size + " ticked, so identity colours repeat every " + IDENT.length;
     $("modehint").textContent = hint;
+  }
+
+  function groupSvg(it, pair) {
+    var g = groupByVid[it.node], c = colorForItem(it.node, pair);
+    var x = it.x - it.w / 2, y = it.y - it.h / 2;
+    var tx = it.x, ty = y + PADY + 10;
+    var tspans = it.lines.map(function (l, k) {
+      return '<tspan x="' + tx.toFixed(1) + '" dy="' + (k ? LH : 0) + '"' +
+             (k ? "" : ' font-weight="600"') + ">" + esc(l) + "</tspan>";
+    }).join("");
+    var k = pair ? null : memberKey(g.top, null);
+    var tip = g.members.length + " operations, collapsed" +
+      (k === null ? "" : " · in " + k + " of " + sel.size + " selected") +
+      "\nclick to expand";
+    function rect(dx, dy) {
+      return '<rect x="' + (x + dx).toFixed(1) + '" y="' + (y + dy).toFixed(1) +
+        '" width="' + it.w + '" height="' + it.h + '" rx="6" fill="' + c[0] +
+        '" stroke="' + c[1] + '" stroke-width="1.4"/>';
+    }
+    // a second, offset rect reads as a stack: "there is more in here"
+    return '<g class="pa-g" data-group="' + g.top + '"><title>' + esc(tip) + "</title>" +
+      rect(3, 3) + rect(0, 0) +
+      '<text x="' + tx.toFixed(1) + '" y="' + ty.toFixed(1) + '">' + tspans + "</text></g>";
   }
 
   function legendHtml(pair) {
@@ -469,6 +562,9 @@ export function createExplorer(root, D, hooks) {
     }
     out.push('<span><span class="sw" style="background:#fff;border-color:' +
              EST_BORDER + '"></span>estimator</span>');
+    if (grouping) {
+      out.push('<span><span class="sw sw-stack"></span>collapsed group (click to expand)</span>');
+    }
     return out.join("");
   }
 
@@ -555,7 +651,7 @@ export function createExplorer(root, D, hooks) {
     // pointer on the svg retargets every later event (pointerup included) to
     // the svg itself, so ``e.target`` there is never the node that was hit.
     drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false,
-             hit: e.target.closest ? e.target.closest(".pa-n") : null };
+             hit: e.target.closest ? e.target.closest(".pa-n, .pa-g") : null };
     svg.setPointerCapture(e.pointerId);
   });
   svg.addEventListener("pointermove", function (e) {
@@ -571,6 +667,11 @@ export function createExplorer(root, D, hooks) {
     var d = drag;
     drag = null;
     if (!d || d.moved) return;
+    if (d.hit && d.hit.hasAttribute("data-group")) {
+      expanded.add(+d.hit.getAttribute("data-group"));
+      draw();
+      return;
+    }
     pick(d.hit ? +d.hit.getAttribute("data-id") : -1);
   });
 
@@ -594,7 +695,7 @@ export function createExplorer(root, D, hooks) {
         '<input type="checkbox" data-pipe="' + pi + '"' + (sel.has(pi) ? " checked" : "") +
         '><span class="dot" style="background:' +
         ((mode === "pipe" && identOf[pi]) || p.c) + '"></span>' +
-        '<a href="#pipe-' + esc(p.n) + '">' + esc(p.n) + "</a></label>";
+        '<a href="#step-' + esc(p.n) + '">' + esc(p.n) + "</a></label>";
     }).join("");
     // Long member lists start collapsed -- with 68 pipelines the open list is
     // most of the panel -- but a state the reader chose survives the re-render
@@ -609,6 +710,16 @@ export function createExplorer(root, D, hooks) {
       n.m.length + "</b> of " + NP + " pipelines overall</p>" +
       "<details" + open + '><summary>pipelines containing this operation (' +
       n.m.length + ")</summary><div class=\"pa-chips\">" + rows + "</div></details>";
+    var g = groupOf[id];
+    if (g && expanded.has(g.top)) {
+      box.innerHTML += '<p><button data-collapse="' + g.top + '">collapse its group (' +
+        g.members.length + " operations)</button></p>";
+      box.querySelector("button[data-collapse]").addEventListener("click", function () {
+        expanded.delete(g.top);
+        draw();
+        pick(id);
+      });
+    }
     box.querySelectorAll("input[data-pipe]").forEach(function (cb) {
       cb.addEventListener("change", function () {
         toggle(+cb.getAttribute("data-pipe"), cb.checked);
@@ -628,16 +739,27 @@ export function createExplorer(root, D, hooks) {
     svg.querySelectorAll(".pa-n.picked").forEach(function (g) {
       g.classList.remove("picked");
     });
+    svg.querySelectorAll(".pa-g.picked").forEach(function (g) {
+      g.classList.remove("picked");
+    });
     if (picked < 0) return;
-    var g = svg.querySelector('.pa-n[data-id="' + picked + '"]');
+    var g = elementFor(picked);
     if (g) g.classList.add("picked");
   }
 
+  /* The drawn element standing for node ``id``: its own box, or its
+   * collapsed group's. */
+  function elementFor(id) {
+    var g = groupOf[id];
+    if (g && !expanded.has(g.top)) return svg.querySelector('.pa-g[data-group="' + g.top + '"]');
+    return svg.querySelector('.pa-n[data-id="' + id + '"]');
+  }
+
   function applyHover() {
-    svg.querySelectorAll(".pa-n.hl").forEach(function (g) { g.classList.remove("hl"); });
+    svg.querySelectorAll(".pa-n.hl, .pa-g.hl").forEach(function (g) { g.classList.remove("hl"); });
     if (hover < 0) return;
     nodesOf[hover].forEach(function (id) {
-      var g = svg.querySelector('.pa-n[data-id="' + id + '"]');
+      var g = elementFor(id);
       if (g) g.classList.add("hl");
     });
   }
@@ -663,7 +785,7 @@ export function createExplorer(root, D, hooks) {
       '<span class="sc">' + score + "</span>" +
       '<span class="dl ' + cls + '">' + d + "</span>" +
       '<span class="ops">' + p.ops + "</span>" +
-      '<a class="jump" href="#pipe-' + esc(p.n) + '" title="jump to details">↗</a>' +
+      '<a class="jump" href="#step-' + esc(p.n) + '" title="jump to details">↗</a>' +
       "</label>";
   }
 
@@ -803,6 +925,27 @@ export function createExplorer(root, D, hooks) {
     syncList();
     draw();
   });
+  $("expand").addEventListener("click", function () {
+    Object.keys(groupByVid).forEach(function (v) { expanded.add(groupByVid[v].top); });
+    draw();
+  });
+  $("collapse").addEventListener("click", function () {
+    expanded.clear();
+    draw();
+  });
+  $("grouping").addEventListener("change", function (e) {
+    grouping = e.target.checked;
+    $("collapse-est").disabled = !grouping;
+    draw();
+  });
+  $("sources-top").addEventListener("change", function (e) {
+    bottomUp = !e.target.checked;
+    draw();
+  });
+  $("collapse-est").addEventListener("change", function (e) {
+    collapseEst = e.target.checked;
+    draw();
+  });
   $("filter").addEventListener("input", function (e) {
     var q = e.target.value.toLowerCase();
     list.querySelectorAll(".pa-row").forEach(function (row) {
@@ -857,4 +1000,104 @@ export function createExplorer(root, D, hooks) {
       }
     }
   };
+}
+
+/* Collapse every connected region of same-membership operations into one
+ * item, and return the contracted graph -- pure, so it can be tested on its own.
+ *
+ *   N         merged-DAG nodes (``i``: input ids)
+ *   ids       visible node ids, in topological order
+ *   key(id)   membership key, comparable along edges
+ *   excluded  nodes that never join a region (estimators kept visible)
+ *   grouping  false: nothing collapses
+ *   expanded  Set of group top ids drawn expanded
+ *
+ * Regions are the components of the edges whose two ends carry the same
+ * pipelines. Contracting them keeps the graph acyclic: a path leaving a region
+ * and coming back passes only through operations with that same membership
+ * (sets only shrink along a path), which are then in the region. Excluded nodes
+ * break that argument -- a region could flow into an estimator and back out --
+ * so nodes are additionally keyed by the set of same-membership excluded nodes
+ * upstream of them ("tag"), which cuts a region at each estimator and restores
+ * the guarantee. One pass over the edges, plus the tag sets.
+ *
+ * Returns { G: {ids, inp, kids, lines, nOps}, groupOf, groupByVid }; a
+ * collapsed group is the item ``vid`` (>= N.length) and ``G.ids`` is a
+ * topological order of the contracted graph. */
+export function contract(N, ids, key, excluded, grouping, expanded) {
+  var vis = new Set(ids), k = {}, tagSet = {}, tag = {}, uf = {};
+  var groupOf = {}, groupByVid = {};
+  ids.forEach(function (id) {
+    k[id] = key(id);
+    var t = new Set();
+    N[id].i.forEach(function (u) {
+      if (!vis.has(u) || k[u] !== k[id]) return;
+      tagSet[u].forEach(function (x) { t.add(x); });
+      if (excluded(u)) t.add(u);
+    });
+    tagSet[id] = t;
+    tag[id] = Array.from(t).sort(function (a, b) { return a - b; }).join(",");
+    uf[id] = id;
+  });
+  function find(x) {
+    while (uf[x] !== x) { uf[x] = uf[uf[x]]; x = uf[x]; }
+    return x;
+  }
+  if (grouping) {
+    ids.forEach(function (v) {
+      if (excluded(v)) return;
+      N[v].i.forEach(function (u) {
+        if (!vis.has(u) || excluded(u) || k[u] !== k[v] || tag[u] !== tag[v]) return;
+        var a = find(u), b = find(v);
+        if (a !== b) { if (a < b) uf[b] = a; else uf[a] = b; }   // root = smallest id
+      });
+    });
+  }
+  var byRoot = {};
+  ids.forEach(function (id) { var r = find(id); (byRoot[r] = byRoot[r] || []).push(id); });
+
+  var itemOf = {}, vid = N.length;
+  Object.keys(byRoot).forEach(function (r) {
+    var members = byRoot[r];
+    if (members.length < 2) return;
+    var g = { top: +r, members: members, vid: vid++, key: k[r] };
+    members.forEach(function (id) { groupOf[id] = g; });
+    groupByVid[g.vid] = g;
+  });
+  ids.forEach(function (id) {
+    var g = groupOf[id];
+    itemOf[id] = g && !expanded.has(g.top) ? g.vid : id;
+  });
+
+  var G = { ids: [], inp: {}, kids: {}, lines: {}, nOps: ids.length };
+  var items = [], seenItem = new Set(), seenEdge = new Set();
+  ids.forEach(function (id) {
+    var it = itemOf[id];
+    if (seenItem.has(it)) return;
+    seenItem.add(it); items.push(it); G.inp[it] = []; G.kids[it] = [];
+  });
+  ids.forEach(function (v) {
+    N[v].i.forEach(function (u) {
+      if (!vis.has(u)) return;
+      var a = itemOf[u], b = itemOf[v], e = a + ">" + b;
+      if (a === b || seenEdge.has(e)) return;
+      seenEdge.add(e); G.inp[b].push(a); G.kids[a].push(b);
+    });
+  });
+  // topological order of the contracted graph (Kahn); roots by first member
+  function first(it) { return it < N.length ? it : groupByVid[it].top; }
+  var indeg = {}, order = [], queue = [];
+  items.forEach(function (it) { indeg[it] = G.inp[it].length; if (!indeg[it]) queue.push(it); });
+  queue.sort(function (a, b) { return first(a) - first(b); });
+  while (queue.length) {
+    var it = queue.shift();
+    order.push(it);
+    G.kids[it].forEach(function (c) { if (--indeg[c] === 0) queue.push(c); });
+  }
+  if (order.length !== items.length) {
+    throw new Error("explorer: grouping produced a cycle (" + order.length + " of " +
+                    items.length + " items ordered)");
+  }
+  G.ids = order;
+  return { G: G, groupOf: groupOf, groupByVid: groupByVid };
 }
