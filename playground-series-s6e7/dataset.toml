@@ -5,3 +5,8 @@ note = "Kaggle competition; fetch with get_data.sh."
 [metric]
 name = "balanced_accuracy"
 lower_is_better = false
+
+[sample]                       # python -m dataset_sample playground-series-s6e7 --size 10k
+script = "make_sample.py"      # stratified on health_condition with an n_splits floor; see its docstring
+out_env = "S6E7_OUT"
+size_env = "S6E7_N_TRAIN"      # train rows; test keeps the script's S6E7_N_TEST (5,000)

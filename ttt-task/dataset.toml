@@ -5,3 +5,8 @@ note = "See DATA.md."
 [metric]
 name = "recall@10"
 lower_is_better = false
+
+[sample]                       # python -m dataset_sample ttt-task --size 200k
+script = "make_input_sample.py"   # link-graph neighbourhood sample; see its docstring
+out_env = "TTT_OUT"
+size_env = ["TTT_N_SEED", "TTT_N_DOMAINS"]   # target rows keep the script's TTT_N_TARGET

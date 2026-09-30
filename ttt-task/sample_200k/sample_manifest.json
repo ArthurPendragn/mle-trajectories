@@ -1,0 +1,39 @@
+{
+  "dataset": "ttt-task",
+  "name": "sample_200k",
+  "adopted": true,
+  "built_by": "unknown (manifest written afterwards by tools/dataset_sample)",
+  "note": "built with make_input_sample.py before manifests were written; sizes per ttt-task/DATA.md (\"Samples\" table), knobs not recorded",
+  "rows": {
+    "domains.parquet": {
+      "out": 205339,
+      "src": null
+    },
+    "freedom-of-the-press.csv": {
+      "out": 50,
+      "src": null
+    },
+    "link-graph.parquet": {
+      "out": 980153,
+      "src": null
+    },
+    "target.tsv": {
+      "out": 5000,
+      "src": null
+    },
+    "trackers.tsv": {
+      "out": 355,
+      "src": null
+    },
+    "tracking_graph_train.parquet": {
+      "out": 516057,
+      "src": null
+    },
+    "url-classification.csv": {
+      "out": 25561,
+      "src": null
+    }
+  },
+  "fingerprint": "ad5a2e592a4ccbf5",
+  "written": "2026-09-30T19:10:50+02:00"
+}

@@ -1,6 +1,6 @@
 """Child process: run ONE pipeline under stratum's scheduler and dump its stats.
 
-    python -m pipeline_analyzer._measure <pipeline.py> <out.json> [--sample-rows N]
+    python -m pipeline_analyzer._measure <pipeline.py> <out.json>
 
 Run with the CWD the pipeline's relative paths resolve against (the folder
 holding ``input/``). ``runtime.py`` is the parent that drives this; it lives in
@@ -8,7 +8,8 @@ its own process so one pipeline's crash, memory blow-up or hang cannot take the
 batch with it, and so peak RSS is attributable to a single pipeline.
 
 The pipeline file is executed as written (``run_name="__main__"``, so its scoring
-block runs), with two interventions:
+block runs), with three interventions -- none of them touches how data is read;
+a smaller sweep runs on a sample folder (``tools/dataset_sample``) instead:
 
 1. ``make_grid_search`` is replaced, so the scoring call goes straight to
    ``stratum._api.grid_search`` (what stratum's own patch does under
@@ -18,13 +19,11 @@ block runs), with two interventions:
    whose ``results_`` looks like skrub's pandas frame -- stratum's is a polars
    frame keyed ``id``/``scores`` -- so each file's own reporting block runs and
    no pipeline needs editing.
-2. ``--sample-rows N`` caps ``pandas.read_csv`` at N rows, so a sweep can be
-   done at a fraction of the cost. Recorded in the output; never a default.
-3. A file that only *defines* a plan (module-level ``pred``, the mle-claude
+2. A file that only *defines* a plan (module-level ``pred``, the mle-claude
    convention: its harness did the scoring) is scored after it ran, the way that
    harness did -- ``pred.skb.make_grid_search(fitted=True, refit=False)`` with no
    ``cv=`` and ``--scoring`` -- through the same replaced ``make_grid_search``.
-4. The file runs under ``skrub.config_context(eager_data_ops=False)``, so
+3. The file runs under ``skrub.config_context(eager_data_ops=False)``, so
    building the plan computes no previews: without it every recorded op is
    evaluated once at build time, which on a data-lake plan re-reads every table
    before the scored run starts. Only ``total_s`` and the memory curve before
@@ -53,16 +52,6 @@ import time
 import traceback
 from collections import defaultdict
 from pathlib import Path
-
-
-def _install_sampling(nrows: int) -> None:
-    """Cap every ``read_csv``/``read_parquet`` at ``nrows`` rows."""
-    import pandas as pd
-
-    _read_csv = pd.read_csv
-    def read_csv(*args, **kwargs):
-        return _read_csv(*args, **{**kwargs, "nrows": nrows})
-    pd.read_csv = read_csv
 
 
 def _declared_cv(dag):
@@ -171,7 +160,7 @@ def _scores(results) -> list[float]:
         return []
 
 
-def measure(path: Path, *, sample_rows: int | None, stats: bool,
+def measure(path: Path, *, stats: bool,
             mem_mode: str = "process", mem_interval: float = 0.1,
             mem_csv: Path | None = None, scoring: str | None = None) -> dict:
     import pandas as pd
@@ -179,9 +168,6 @@ def measure(path: Path, *, sample_rows: int | None, stats: bool,
     import stratum
     from skrub._data_ops._skrub_namespace import SkrubNamespace
     from stratum._api import grid_search as stratum_grid_search
-
-    if sample_rows:
-        _install_sampling(sample_rows)
 
     tracker = None
     if mem_mode != "off":
@@ -291,7 +277,6 @@ def measure(path: Path, *, sample_rows: int | None, stats: bool,
     out["max_rss_mb"] = round(max(
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 1024, 1)
-    out["sample_rows"] = sample_rows
     out["stats_enabled"] = stats
     out["eager_previews"] = False
     return out
@@ -302,7 +287,6 @@ def main(argv=None) -> int:
                                  description=__doc__)
     ap.add_argument("pipeline", type=Path)
     ap.add_argument("out", type=Path)
-    ap.add_argument("--sample-rows", type=int, default=None)
     ap.add_argument("--no-stats", action="store_true")
     ap.add_argument("--scoring", default=None,
                     help="scorer for a file that only defines `pred`")
@@ -313,8 +297,7 @@ def main(argv=None) -> int:
                     help="write the full RSS sample series here as it is collected")
     args = ap.parse_args(argv)
 
-    result = measure(args.pipeline, sample_rows=args.sample_rows,
-                     stats=not args.no_stats, mem_mode=args.mem_mode,
+    result = measure(args.pipeline, stats=not args.no_stats, mem_mode=args.mem_mode,
                      mem_interval=args.mem_interval, mem_csv=args.mem_csv,
                      scoring=args.scoring)
     args.out.write_text(json.dumps(result))

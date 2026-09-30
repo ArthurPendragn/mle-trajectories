@@ -5,3 +5,13 @@ note = "Kaggle competition; fetch with get_data.sh."
 [metric]
 name = "accuracy"
 lower_is_better = false
+
+[sample]                       # python -m dataset_sample tab_playground_dec_21 --size 100k
+target = "Cover_Type"          # stratified: seven classes, two of them tiny (class 5 has 1 row)
+min_per_class = 5              # no class below the 5 CV folds the pipelines use
+seed = 0
+
+[sample.tables]
+"train.csv" = "sample"
+"test.csv" = "keep"            # prediction only: kept whole, so submissions stay complete
+"sample_submission.csv" = "keep"

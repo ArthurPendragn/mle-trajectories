@@ -164,7 +164,7 @@ the real data and is expensive:
 # from tab_playground_dec_21/mle_star/
 python -m pipeline_analyzer.runtime \
     --pipelines skrubify_openai --pipelines skrubify_openai/ensemble \
-    --run-in .. --sample-rows 100000
+    --run-in ../sample_100k --out runtime_stats_skrubify_openai_sample_100k.json
 ```
 
 This writes `runtime_stats_skrubify_openai.json` beside the report, which
@@ -204,14 +204,17 @@ fell between two 100 ms polls. So: read the curve for shape, `max_rss_mb` for
 the high-water mark, and drop `--mem-interval` if you need the curve to catch
 short spikes.
 
-**`--sample-rows` changes one operator, not just the data size.** It caps rows by
-rebinding `pd.read_csv` before the pipeline builds its plan, and the plan captures
-that wrapper (`apply_func(pd.read_csv)`). stratum's lowering recognises the real
-`pandas.read_csv` and turns it into a native `PandasReadCSV` op; it does not
-recognise the wrapper, so under sampling the read stays an opaque
-`CallOp(read_csv)` over a `ValueOp(path)`. Everything else measures the same plan
-— but the read row of a sampled store is not comparable with a full-data one, and
-the report says so where it shows.
+**Smaller sweeps run on a sample folder, not a row cap.** `--run-in` points at
+`<dataset>/sample_<size>/`, a persisted sample built by `tools/dataset_sample`
+from the recipe in `dataset.toml` (same file names as `input/`, fewer rows,
+joins kept consistent). The pipelines run unmodified and every read lowers to
+the same native operator as on the full data, so only the data size differs.
+Each entry records the sample's name and fingerprint (`data`,
+`data_fingerprint`); rebuilding the sample differently makes its entries stale.
+The former `--sample-rows N`, which capped rows by wrapping `pandas.read_csv`,
+is gone: it only covered one reader, overrode a pipeline's own `nrows`, cut
+joined tables independently, and turned the read into an opaque `CallOp`.
+Entries it produced are never considered fresh.
 
 - `--mem-mode process|system|off` — `system` measures total memory in use, for a
   workload that fans out over processes; `off` skips sampling
@@ -241,9 +244,6 @@ orphaned a store before starting a sweep that may take hours.
 Options:
 - `--run-in DIR`     working directory for the pipelines (default: nearest
   ancestor of `--pipelines` holding `input/`)
-- `--sample-rows N`  cap `read_csv` at N rows. A full sweep on a large table can
-  take days; a sample makes it minutes. Stored per entry, and an entry measured
-  at a different sample size is re-measured rather than silently mixed in
 - `--scoring NAME`   scorer for plan-only files (default: `workspace.json`)
 - `--only NAME …`, `--limit N`  measure a subset
 - `--timeout S`      per pipeline, killing the whole process group (default 3600)
@@ -254,7 +254,7 @@ Options:
 - `--out FILE`       store path
 
 **The store is a cache.** A pipeline already measured with the same code
-(`code_sha1`), the same sample size and the same stratum commit is skipped, and
+(`code_sha1`), the same data (full, or a sample with the same fingerprint) and the same stratum commit is skipped, and
 the store is rewritten after every pipeline, so a sweep can be interrupted and
 resumed, or filled in one pipeline at a time. The commit is kept per entry
 rather than only per store, because an interrupted sweep across an upgrade

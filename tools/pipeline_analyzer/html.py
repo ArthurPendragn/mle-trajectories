@@ -218,6 +218,13 @@ def _pipeline_section(node, diff: DagDiff | None, lineage: Lineage,
 """
 
 
+def _data_of(rt: dict) -> str:
+    """Which data a runtime entry measured, for a reader."""
+    if rt.get("sample_rows"):
+        return f"a {rt['sample_rows']:,}-row cap (legacy)"
+    return rt.get("data") or "the full data"
+
+
 def _fmt_secs(seconds):
     if seconds is None:
         return "—"
@@ -312,7 +319,7 @@ def _runtime_block(rt: dict, top: int = 8):
         fields.append(("pool hits", f"{100 * pool['hit_rate']:.0f}%"))
     if rt.get("best_score") is not None:
         # This run's own score, which is not the agent's score above: it comes
-        # from stratum's scheduler and, on a sampled sweep, from fewer rows.
+        # from stratum's scheduler and, on a sample folder, from fewer rows.
         n = len(rt.get("scores") or ())
         label = "best of %d measured" % n if n > 1 else "score measured"
         fields.append((label, f"{rt['best_score']:.5f}"))
@@ -336,11 +343,8 @@ def _runtime_block(rt: dict, top: int = 8):
              f"<th class=num>time (s)</th><th class=num>share</th></tr>{rows}</table>")
 
     note = []
-    # ``sample_rows`` is None for a full-data measurement, which used to print
-    # nothing at all -- leaving the reader unable to tell which of the two the
-    # numbers came from, the one thing they most need to know.
-    note.append(f"measured on a {rt['sample_rows']:,}-row sample"
-                if rt.get("sample_rows") else "measured on the full data")
+    # always say which data: it is the one thing a reader most needs to know
+    note.append(f"measured on {_data_of(rt)}")
     if rt.get("cv"):
         note.append(f"cv: {rt['cv']}")
     sub = (f'<p class="muted" style="margin:6px 0 0">{esc(" · ".join(note))}</p>'
@@ -375,12 +379,11 @@ def _runtime_section(lineage: Lineage):
         f'<td class=num>{"—" if n.score is None else f"{n.score:.5f}"}</td>'
         "</tr>"
         for n in measured)
-    samples = {n.runtime.get("sample_rows") for n in measured}
+    samples = {_data_of(n.runtime) for n in measured}
     note = ""
     if samples:
-        shown = ", ".join(f"{s:,}" if s else "full data" for s in sorted(
-            samples, key=lambda s: (s is None, s)))
-        note = (f'<p class="muted">Rows read per pipeline: {shown}. '
+        shown = ", ".join(sorted(samples))
+        note = (f'<p class="muted">Data: {shown}. '
                 f"Wall time is the scored grid search only, excluding process "
                 f"start-up and plan construction.</p>")
     total = sum(n.runtime.get("wall_s") or 0 for n in measured)
@@ -521,20 +524,15 @@ def _heavy_hitters_section(lineage: Lineage):
         f"<td class=num>{len(e['pipes'])}/{len(measured)}</td></tr>"
         for op, e in sorted(fine.items(), key=lambda kv: -kv[1]["time"]))
 
-    samples = {n.runtime.get("sample_rows") for n in measured}
-    where = ", ".join(f"{s:,} rows" if s else "the full data" for s in sorted(
-        samples, key=lambda s: (s is None, s)))
-    # A sampled sweep caps rows by rebinding ``pd.read_csv`` before the plan is
-    # built, and the plan captures that wrapper -- which stratum's lowering no
-    # longer recognises as the pandas function, so the read stays an opaque
-    # CallOp instead of becoming a native read op. It is the one row here that a
-    # sampled and a full-data store do not measure the same way.
-    caveat = ("" if samples == {None} else
-              '<p class="muted">Sampled runs cap rows by wrapping '
-              "<code>pandas.read_csv</code> before the plan is built, so the read "
-              "is not lowered to <code>PandasReadCSV</code> and shows up as "
-              "<code>CallOp</code> instead — the read row is the one that is not "
-              "comparable with a full-data store.</p>")
+    samples = {_data_of(n.runtime) for n in measured}
+    where = ", ".join(sorted(samples))
+    # entries from the removed --sample-rows cap measured a wrapped reader (an
+    # opaque CallOp instead of a native read op): say so where they appear
+    caveat = ("" if not any(n.runtime.get("sample_rows") for n in measured) else
+              '<p class="muted">Some entries come from the removed <code>--sample-rows</code> '
+              "cap, which wrapped <code>pandas.read_csv</code>: their read shows up as "
+              "<code>CallOp</code> and is not comparable. Re-measure them on a sample "
+              "folder.</p>")
     return f"""
 <h2 id="agg-measured" style="border:0">Operator statistics — measured time</h2>
 <p class="muted">{len(agg)} operator class(es) over the {len(measured)} measured

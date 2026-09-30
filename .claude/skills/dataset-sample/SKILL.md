@@ -14,16 +14,23 @@ round is hours, so the run layer — the only layer that catches scoring-time
 failures and the only one that checks a conversion is *faithful* rather than
 merely valid — is unusable.
 
-The fix is a small sample that keeps the task's structure. Not a row cap:
-`pipeline_analyzer` already has `--sample-rows`, and its own README warns
-(`tools/pipeline_analyzer/README.md:207-213`) that it
-"changes one operator, not just the data size… the read row of a sampled store
-is not comparable with a full-data one". On a joined or graph task a row cap is
-worse than slow — it produces a dataset that runs and measures nothing.
+The fix is a small sample that keeps the task's structure, persisted as its own
+run-root. Not a row cap at read time: `pipeline_analyzer` used to have
+`--sample-rows` and it was removed, because it covered only `pandas.read_csv`,
+overrode a pipeline's own `nrows`, cut joined tables independently and turned
+the read into an opaque operator. On a joined or graph task a row cap is worse
+than slow — it produces a dataset that runs and measures nothing.
 
-Your output is a **per-dataset `make_sample.py`**, because the reasoning is
-per-dataset. `ttt-task/make_input_sample.py` is the worked example; read it
-before writing a new one.
+Your output is a **`[sample]` recipe in `<dataset>/dataset.toml`**, which
+`tools/dataset_sample` builds (`python -m dataset_sample <dataset> --size 100k`,
+or "Build sample" on the website; see `tools/dataset_sample/README.md`). The
+generic builder covers flat tables (seeded, optionally stratified row samples)
+and star schemas (sample the fact table, `match` the others on their keys, keep
+lookups whole). Only a shape it cannot express — a graph, images, an
+out-of-time split — needs a **per-dataset `make_sample.py`**, referenced from
+the recipe with `script = ...`, because there the reasoning is per-dataset.
+`ttt-task/make_input_sample.py` is the worked example of such a script; read it
+before writing a new one. Either way, choose the strategy with Steps 1–2 below.
 
 ## Layout you are producing
 
@@ -84,7 +91,7 @@ a naive row sample would have destroyed. `make_input_sample.py:1-11` is the mode
 > the graph-derived features (degrees, direct tracker links, neighbour tracker
 > adoption) non-trivial.
 
-## Step 3 — write `<dataset>/make_sample.py`
+## Step 3 — write the recipe, or `<dataset>/make_sample.py` when it cannot express the shape
 
 Contract, all of it taken from `make_input_sample.py`:
 
@@ -208,4 +215,8 @@ run-to-run spread; `tools/skrubify/README.md:287-291` documents LightGBM with
   was used to verify a conversion step by step.
 - `<dataset>/DATA.md` / `<dataset>/get_data.sh` — how `input/` gets populated in
   the first place.
-- `tools/pipeline_analyzer/README.md` — why `--sample-rows` is not this.
+- `tools/dataset_sample/README.md` — the recipe format, the builder's checks,
+  the manifest and fingerprint.
+- `tab_playground_dec_21/dataset.toml` — a generic recipe (flat table,
+  stratified); `ttt-task/dataset.toml` and `playground-series-s6e7/dataset.toml`
+  — script recipes.

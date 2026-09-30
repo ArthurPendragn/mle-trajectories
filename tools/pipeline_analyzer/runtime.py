@@ -1,13 +1,13 @@
 """Collect per-pipeline runtime statistics by executing pipelines under stratum.
 
     python -m pipeline_analyzer.runtime --pipelines skrubify_openai \
-        --pipelines skrubify_openai/ensemble --run-in ../ --sample-rows 200000
+        --pipelines skrubify_openai/ensemble --run-in ../sample_100k
 
 Executing a pipeline needs the real dataset and is expensive, so this is a
 separate command from the report: it writes a JSON store next to the pipelines
 folder (``runtime_stats_<folder>.json``) and the analyzer only *reads* that file.
-Re-running skips every pipeline already measured with the same code and sample
-size, so a sweep can be filled in over several sessions, and the store is
+Re-running skips every pipeline already measured with the same code on the same
+data, so a sweep can be filled in over several sessions, and the store is
 rewritten after each pipeline so an interrupted sweep keeps what it collected.
 
 Each pipeline runs in its own process (see ``_measure.py``) with ``--run-in`` as
@@ -30,6 +30,8 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+
+from dataset_sample._manifest import data_fingerprint
 
 STORE_VERSION = 1
 
@@ -84,7 +86,7 @@ def code_sha1(path: Path) -> str:
     return hashlib.sha1(Path(path).read_bytes()).hexdigest()[:16]
 
 
-def is_fresh(entry: dict, path: Path, sample_rows: int | None,
+def is_fresh(entry: dict, path: Path, data: str | None,
              mem_mode: str = "process", stratum_commit: str | None = None) -> bool:
     """Whether a stored measurement still describes this file and this sweep.
 
@@ -100,10 +102,16 @@ def is_fresh(entry: dict, path: Path, sample_rows: int | None,
     8b7f7ba3 with both reporting ``0.0.0.dev2``, which is why the commit is what
     is compared. An entry from before the commit was recorded carries no commit,
     so it is stale as soon as the current executor has one.
+
+    ``data`` is the fingerprint of the sample the sweep runs on (None for the
+    full data), so rebuilding a sample differently re-measures on it. An entry
+    from the removed ``--sample-rows`` cap (``sample_rows`` set) is never fresh:
+    it measured a patched reader, not the data.
     """
     if (entry.get("status") != "ok"
             or entry.get("code_sha1") != code_sha1(path)
-            or entry.get("sample_rows") != sample_rows):
+            or entry.get("sample_rows")
+            or entry.get("data_fingerprint") != data):
         return False
     if stratum_commit and entry.get("stratum_commit") != stratum_commit:
         return False
@@ -114,7 +122,7 @@ def is_fresh(entry: dict, path: Path, sample_rows: int | None,
 # running
 # --------------------------------------------------------------------------- #
 def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
-            sample_rows: int | None, stats: bool, mem_mode: str = "process",
+            stats: bool, mem_mode: str = "process",
             mem_interval: float = 0.1, mem_csv: Path | None = None,
             scoring: str | None = None) -> dict:
     """Measure one pipeline in a subprocess. Never raises."""
@@ -122,8 +130,6 @@ def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
     os.close(fd)
     cmd = [python, "-m", "pipeline_analyzer._measure", str(Path(path).resolve()),
            out_json]
-    if sample_rows:
-        cmd += ["--sample-rows", str(sample_rows)]
     if not stats:
         cmd.append("--no-stats")
     cmd += ["--mem-mode", mem_mode, "--mem-interval", str(mem_interval)]
@@ -163,10 +169,9 @@ def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
 
     if timed_out:
         entry = {"status": "timeout",
-                 "error": f"killed after {timeout:.0f}s", "sample_rows": sample_rows}
+                 "error": f"killed after {timeout:.0f}s"}
     elif not entry:
-        entry = {"status": "error", "error": _failure_reason(log, proc.returncode),
-                 "sample_rows": sample_rows}
+        entry = {"status": "error", "error": _failure_reason(log, proc.returncode)}
     if entry.get("status") != "ok":
         entry["returncode"] = proc.returncode
         # Keep both ends of the log: a side-car process writing to the same pipe
@@ -240,11 +245,11 @@ def _fmt(entry: dict) -> str:
     if entry.get("status") != "ok":
         return f"{entry.get('status')}: {(entry.get('error') or '')[:70]}"
     score = entry.get("best_score")
-    rows = entry.get("sample_rows")
+    rows = entry.get("sample_rows")     # legacy --sample-rows entries
     mem = entry.get("memory") or {}
     peak = mem.get("peak_mb") or entry.get("max_rss_mb") or 0
     bits = [f"{entry['wall_s']:.1f}s", f"{peak:.0f}MB peak",
-            f"{rows:,} rows" if rows else "full data",
+            f"{rows:,}-row cap (legacy)" if rows else entry.get("data") or "full data",
             f"{len(entry.get('ops') or ())} op types"]
     if score is not None:
         bits.append(f"score {score:.5f}")
@@ -269,9 +274,6 @@ def main(argv=None) -> int:
                     help="measure only these pipelines")
     ap.add_argument("--limit", type=int, default=None,
                     help="stop after N pipelines actually measured")
-    ap.add_argument("--sample-rows", type=int, default=None, metavar="N",
-                    help="cap read_csv at N rows -- a cheap sweep. Recorded per "
-                         "entry; entries with a different sample size are re-measured")
     ap.add_argument("--timeout", type=float, default=3600,
                     help="seconds per pipeline before it is killed (default 3600)")
     ap.add_argument("--python", default=sys.executable,
@@ -336,12 +338,18 @@ def main(argv=None) -> int:
               f"interpreter has {stratum_commit[:12]} -- those entries are stale "
               f"and will be re-measured", file=sys.stderr)
 
+    # Which data: a sample folder (built by tools/dataset_sample, identified by
+    # its fingerprint) or the full data. A smaller sweep runs on a smaller
+    # sample folder; nothing about the pipeline is patched.
+    run_in = (args.run_in or _guess_run_in(pipe_dirs[0])).resolve()
+    data_fp = data_fingerprint(run_in) if run_in.is_dir() else None
+    data_name = run_in.name if data_fp else "full data"
+
     todo = []
     for name, path in pipelines:
         entry = store["pipelines"].get(name)
         if entry and not args.force:
-            if is_fresh(entry, path, args.sample_rows, args.mem_mode,
-                        stratum_commit):
+            if is_fresh(entry, path, data_fp, args.mem_mode, stratum_commit):
                 continue
             if entry.get("status") != "ok" and not args.retry_failed:
                 continue
@@ -357,20 +365,19 @@ def main(argv=None) -> int:
 
     if args.list:
         print(f"store: {store_path}  ({len(store['pipelines'])} entry/entries)")
-        where = f"{args.sample_rows:,} rows" if args.sample_rows else "full data"
-        print(f"a sweep at {where} would run {pending} of {len(pipelines)}"
+        where = f"on {data_name}" + (f" ({data_fp})" if data_fp else "")
+        print(f"a sweep {where} would run {pending} of {len(pipelines)}"
               f"{f' ({len(todo)} of them now, --limit {args.limit})' if deferred else ''}:")
         for name, path in pipelines:
             entry = store["pipelines"].get(name)
             mark = ("would run" if (name, path) in todo
                     else "pending  " if entry is None or
-                         not is_fresh(entry, path, args.sample_rows,
+                         not is_fresh(entry, path, data_fp,
                                       args.mem_mode, stratum_commit)
                     else "cached   ")
             print(f"  {mark}  {name:<24} {_fmt(entry) if entry else '—'}")
         return 0
 
-    run_in = (args.run_in or _guess_run_in(pipe_dirs[0])).resolve()
     if not run_in.is_dir():
         ap.error(f"no such directory: {run_in}")
     _warn_about_data(run_in)
@@ -381,8 +388,8 @@ def main(argv=None) -> int:
           file=sys.stderr)
     print(f"  run-in: {run_in}", file=sys.stderr)
     print(f"  store:  {store_path}", file=sys.stderr)
-    if args.sample_rows:
-        print(f"  sample: {args.sample_rows} rows", file=sys.stderr)
+    print(f"  data:   {data_name}" + (f" (fingerprint {data_fp})" if data_fp else ""),
+          file=sys.stderr)
 
     scoring = args.scoring or _workspace_scoring(pipe_dirs[0])
     if scoring:
@@ -394,7 +401,7 @@ def main(argv=None) -> int:
     # otherwise stay in the store and describe a sweep that never happened
     store["meta"] = dict(
         pipelines=[str(d) for d in pipe_dirs], run_in=str(run_in),
-        sample_rows=args.sample_rows, stats_enabled=not args.no_stats,
+        data=data_name, data_fingerprint=data_fp, stats_enabled=not args.no_stats,
         cv_from_plan="stratum grid_search resolves mark_as_X(cv=...)",
         mem_mode=args.mem_mode, mem_interval_s=args.mem_interval,
         mem_csv_dir=str(mem_dir.name) if mem_dir else None,
@@ -405,7 +412,7 @@ def main(argv=None) -> int:
     for i, (name, path) in enumerate(todo, 1):
         print(f"[{i}/{len(todo)}] {name} … ", end="", flush=True, file=sys.stderr)
         entry = run_one(path, run_in=run_in, python=args.python,
-                        timeout=args.timeout, sample_rows=args.sample_rows,
+                        timeout=args.timeout,
                         stats=not args.no_stats, mem_mode=args.mem_mode,
                         mem_interval=args.mem_interval,
                         mem_csv=(mem_dir / f"{name}.csv") if mem_dir else None,
@@ -416,6 +423,8 @@ def main(argv=None) -> int:
         # store whose entries came from two builds, and each has to be judged on
         # the one that produced it.
         entry["stratum_commit"] = stratum_commit
+        entry["data"] = data_name
+        entry["data_fingerprint"] = data_fp
 
         store["pipelines"][name] = entry
         save_store(store_path, store)      # after each one: a kill keeps progress
