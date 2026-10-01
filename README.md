@@ -61,7 +61,7 @@ sampled number was measured on.
 
 ## Corpus
 
-8 datasets, 22 agent runs, **1151 pipelines** in total. One pipeline = one script
+9 datasets, 23 agent runs, **1168 pipelines** in total. One pipeline = one script
 the agent actually executed. Skrubified rewrites (`skrubify*/`) are the same
 pipeline expressed as a skrub DataOps plan, so they are not counted again.
 
@@ -77,6 +77,7 @@ pipeline expressed as a skrub DataOps plan, so they are not counted again.
 | cover_type_multi_table | mle_star_run_2 | MLE-STAR | 2 | 28 | 5 | 3 | **38** |
 | house_price | mlevolve_run_1 | mlevolve | – | 13 | – | – | **13** |
 | house_price | mlevolve_run_2 | mlevolve | – | 46 | – | – | **46** |
+| nyc-housing-violation | mlevolve_run_1 | mlevolve | – | 17 | – | – | **17** |
 | nyc_taxi_fare | mlevolve_run_1 | mlevolve | – | 21 | – | – | **21** |
 | nyc_taxi_fare | mlevolve_run_2 | mlevolve | – | 17 | – | – | **17** |
 | nyc_taxi_fare | mlevolve_run_3 | mlevolve | – | 18 | – | – | **18** |
@@ -89,10 +90,11 @@ pipeline expressed as a skrub DataOps plan, so they are not counted again.
 | ttt-task | mlevolve_run_4 | mlevolve | – | 81 | – | – | **81** |
 | ttt-task | mle-claude-run1 | Claude Code | – | 15 | – | – | **15** |
 | ttt-task | mle-claude-run2 | Claude Code | – | 13 | 3 | – | **16** |
-| | | | **30** | **925** | **178** | **18** | **1151** |
+| | | | **30** | **942** | **178** | **18** | **1168** |
 
 Runs per dataset: beaver_enroll 4, aptos2019-blindness-detection 2,
-cover_type_multi_table 2, house_price 2, nyc_taxi_fare 3,
+cover_type_multi_table 2, house_price 2, nyc-housing-violation 1,
+nyc_taxi_fare 3,
 playground-series-s6e7 1,
 tab_playground_dec_21 2 (one MLE-STAR, one Claude Code),
 ttt-task 6 (four mlevolve, two Claude Code).
@@ -101,14 +103,14 @@ Notes on the counts:
 
 - The ablation column is MLE-STAR's ablation scripts — runnable variants of the
   current solution, but probes rather than candidate solutions. Drop them and
-  the corpus is 973 pipelines.
+  the corpus is 990 pipelines.
 - mlevolve keeps a script only for nodes that ran; its journals hold 31 nodes
   against 21 saved scripts (nyc_taxi_fare), 31 against 24
   (playground-series-s6e7), 16 against 12 (ttt-task run 1), 35 against 19
   (ttt-task run 2), 11 against 8 (ttt-task run 3), 16 against 13
   (house_price run 1), 51 against 46 (house_price run 2), and 21 against 17
   and 21 against 18 (nyc_taxi_fare runs 2 and 3), and 101 against 81
-  (ttt-task run 4).
+  (ttt-task run 4), and 21 against 17 (nyc-housing-violation run 1).
 - `nyc_taxi_fare` run 1 saw an anonymised description of the task
   (`od_cost_regression`, with `record_id`, `cost`, `origin_x/y`); runs 2 and 3
   saw the un-anonymised one naming New York City taxi fares. Same data and
