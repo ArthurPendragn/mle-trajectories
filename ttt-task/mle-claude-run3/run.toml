@@ -1,0 +1,3 @@
+agent = "mle-claude"
+label = "Claude Code run 3"
+note = "Target-shift-aware sample (uniform over domains with >= 2 trackers), 15 steps + final; held-out Recall@10 0.8963 (see pipelines/README.md)."

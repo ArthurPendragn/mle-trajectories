@@ -61,7 +61,7 @@ sampled number was measured on.
 
 ## Corpus
 
-9 datasets, 23 agent runs, **1168 pipelines** in total. One pipeline = one script
+9 datasets, 25 agent runs, **1216 pipelines** in total. One pipeline = one script
 the agent actually executed. Skrubified rewrites (`skrubify*/`) are the same
 pipeline expressed as a skrub DataOps plan, so they are not counted again.
 
@@ -78,6 +78,8 @@ pipeline expressed as a skrub DataOps plan, so they are not counted again.
 | house_price | mlevolve_run_1 | mlevolve | – | 13 | – | – | **13** |
 | house_price | mlevolve_run_2 | mlevolve | – | 46 | – | – | **46** |
 | nyc-housing-violation | mlevolve_run_1 | mlevolve | – | 17 | – | – | **17** |
+| nyc-housing-violation | mle-claude-run1 | Claude Code | – | 32 | – | – | **32** |
+| nyc-housing-violation | mle-claude-run1_v2 | Claude Code | – | (32) | – | – | **(32)** |
 | nyc_taxi_fare | mlevolve_run_1 | mlevolve | – | 21 | – | – | **21** |
 | nyc_taxi_fare | mlevolve_run_2 | mlevolve | – | 17 | – | – | **17** |
 | nyc_taxi_fare | mlevolve_run_3 | mlevolve | – | 18 | – | – | **18** |
@@ -90,20 +92,22 @@ pipeline expressed as a skrub DataOps plan, so they are not counted again.
 | ttt-task | mlevolve_run_4 | mlevolve | – | 81 | – | – | **81** |
 | ttt-task | mle-claude-run1 | Claude Code | – | 15 | – | – | **15** |
 | ttt-task | mle-claude-run2 | Claude Code | – | 13 | 3 | – | **16** |
-| | | | **30** | **942** | **178** | **18** | **1168** |
+| ttt-task | mle-claude-run3 | Claude Code | – | 14 | 2 | – | **16** |
+| | | | **30** | **988** | **180** | **18** | **1216** |
 
 Runs per dataset: beaver_enroll 4, aptos2019-blindness-detection 2,
-cover_type_multi_table 2, house_price 2, nyc-housing-violation 1,
+cover_type_multi_table 2, house_price 2,
+nyc-housing-violation 2 (one mlevolve, one Claude Code, plus the v2 rewrite of the latter),
 nyc_taxi_fare 3,
 playground-series-s6e7 1,
 tab_playground_dec_21 2 (one MLE-STAR, one Claude Code),
-ttt-task 6 (four mlevolve, two Claude Code).
+ttt-task 7 (four mlevolve, three Claude Code).
 
 Notes on the counts:
 
 - The ablation column is MLE-STAR's ablation scripts — runnable variants of the
   current solution, but probes rather than candidate solutions. Drop them and
-  the corpus is 990 pipelines.
+  the corpus is 1036 pipelines.
 - mlevolve keeps a script only for nodes that ran; its journals hold 31 nodes
   against 21 saved scripts (nyc_taxi_fare), 31 against 24
   (playground-series-s6e7), 16 against 12 (ttt-task run 1), 35 against 19
@@ -123,11 +127,23 @@ Notes on the counts:
 - `mle_claude_run_1` writes skrub DataOps plans directly, so it has no
   `skrubify*/` folder. Its `common.py`, `features.py`, `nn.py` (shared modules)
   and `data_exploration_*.py` are not pipelines and are excluded.
-- The same exclusions apply to `ttt-task/mle-claude-run{1,2}`: only
-  `pipeline_NN.py` counts, plus `ablation_NN.py` in the ablation column.
+- The same exclusions apply to `ttt-task/mle-claude-run{1,2,3}` and
+  `nyc-housing-violation/mle-claude-run1`: only `pipeline_NN.py` counts, plus
+  `ablation_NN.py` in the ablation column. In `ttt-task/mle-claude-run3` the
+  two ablations are `pipeline_05.py` and `pipeline_10.py`: fused-choice grids
+  of 8 and 16 variants, each counted once in the ablation column. Its shared
+  modules (`common.py`, `rankers.py`) and analysis scripts
+  (`shift_observables.py`, `stratified_report.py`) are excluded.
   `featureset.py` / `models.py` (shared modules) and run 1's
   `final_pipeline.py` are excluded — the latter self-documents as a refit of
-  `pipeline_11` for submission, "not a scored candidate".
+  `pipeline_11` for submission, "not a scored candidate". The same holds for
+  `final_pipeline.py` in `ttt-task/mle-claude-run3` and
+  `nyc-housing-violation/mle-claude-run1`.
+- `nyc-housing-violation/mle-claude-run1_v2` is not a separate run. It has the
+  same workspace id and a byte-identical `results.json` as `mle-claude-run1`,
+  with the pipelines rewritten onto a fine-grained DataOps `common.py`. It is
+  listed in parentheses and, like a `skrubify*/` rewrite, not counted in the
+  totals. Its `pipeline_test.py` is not one of the agent's steps.
 - `tab_playground_dec_21/mle_star` is one run; `skrubify_gemini` and
   `skrubify_openai` are two translations of it by different skrubify providers.
 - Both aptos runs ended in agent error, and the beaver_enroll runs were never
