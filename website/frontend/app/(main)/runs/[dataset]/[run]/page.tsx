@@ -67,7 +67,7 @@ function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff>
           <th>#</th><th>Pipeline</th><th>Phase</th><th>Parent</th>
           <th className="num">Score</th><th className="num">Δ parent</th>
           {hasDiffs && <><th className="num" title="added + removed lines against the parent">Lines changed</th>
-            <th className="num" title="how much of the code is shared with the parent">Similar</th>
+            <th className="num" title="changed code lines (blank and comment lines ignored) as a share of the parent's code lines">Changed</th>
             <th>Code vs parent</th></>}<th>Description</th>
         </tr>
       </thead>
@@ -92,7 +92,7 @@ function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff>
                     {d && (d.same_code ? <span className="muted">0</span>
                       : <span title={`+${d.lines_added} / −${d.lines_removed}`}>{d.lines_changed}</span>)}
                   </td>
-                  <td className="num small muted">{d ? `${Math.round(d.similarity * 100)}%` : ""}</td>
+                  <td className="num small muted">{d?.change_ratio != null ? `${Math.round(d.change_ratio * 100)}%` : ""}</td>
                   <td className="small code-delta" title={d ? diffTitle(d) : undefined}>{d?.summary ?? ""}</td>
                 </>;
               })()}

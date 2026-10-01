@@ -165,11 +165,13 @@ skrubified yet: size and structure, the models / transformers / CV splitters /
 metrics used (with how many pipelines use each and which used it first),
 libraries, files read, pandas vs polars, run-time `pip install`s, and a
 per-pipeline table whose rows open the components with their hyperparameters.
-**Change along the trajectory** charts lines changed against the parent
+**Change along the trajectory** shows the CDF of the ratio of changed code
+lines over every parent → child step (median, p90, p99 marked), and charts
+lines changed against the parent
 (added + removed) and lines of code per step, in trajectory order, with the
 median change, median similarity and how many steps repeat their parent's
-code. The steps table gets **lines changed**, **similar** and **code vs
-parent** columns (components added/removed, hyperparameters changed; the full
+code. The steps table gets **lines changed**, **changed** (the ratio) and **code
+vs parent** columns (components added/removed, hyperparameters changed; the full
 comparison in the tooltip). Files read are grouped under their folder, so a
 data lake's prefix shows once.
 

@@ -11,6 +11,10 @@ from .analyze import normalized
 REPORTED = ("model", "ensemble", "transformer", "pipeline", "splitter", "search", "metric")
 
 
+def _code_lines(lines: list[str]) -> list[str]:
+    return [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+
+
 def _components(f: dict) -> dict[tuple[str, str], list[dict]]:
     out: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for c in f.get("components") or []:
@@ -32,6 +36,14 @@ def compare(parent: dict, child: dict, parent_src: str, child_src: str,
         if op in ("replace", "insert"):
             added += j2 - j1
     na, nb = normalized_pair or (normalized(parent_src), normalized(child_src))
+
+    # the same on code lines only (blank and comment lines dropped), as a
+    # ratio of the parent's code lines: how much of the parent was touched
+    ca, cb = _code_lines(a), _code_lines(b)
+    code_changed = 0
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ca, cb).get_opcodes():
+        if op != "equal":
+            code_changed += (i2 - i1) + (j2 - j1)
 
     pc, cc = _components(parent), _components(child)
     count_p = Counter({k: len(v) for k, v in pc.items()})
@@ -63,6 +75,8 @@ def compare(parent: dict, child: dict, parent_src: str, child_src: str,
         "lines_added": added, "lines_removed": removed,
         # how much of the code moved: added + removed lines (a replaced line counts twice)
         "lines_changed": added + removed,
+        "code_lines_changed": code_changed,
+        "change_ratio": round(code_changed / len(ca), 4) if ca else None,
         "loc_delta": loc(child) - loc(parent),
         "components_added": comp_added, "components_removed": comp_removed,
         "params_changed": params,

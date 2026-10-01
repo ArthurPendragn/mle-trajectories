@@ -259,3 +259,13 @@ td.code-delta { color: var(--muted); max-width: 360px; }
 .code-grid tr.path-dir td { border-bottom: none; padding-bottom: 0; font-size: 11px; }
 .code-grid td.in-dir { padding-left: 22px; }
 .chg-best { fill: var(--fg); }
+.cdf { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: flex-start; margin: 4px 0 12px; }
+.cdf svg { display: block; }
+.cdf-line { stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+.cdf-ref line { stroke: var(--muted); stroke-width: 1.2; }
+.cdf-key line { stroke: var(--muted); }
+.chg-axis { stroke: var(--muted); stroke-width: 1; }
+.chg-cross { stroke: var(--muted); stroke-width: 1; }
+.cdf-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+.cdf-side p { margin: 3px 0; display: flex; gap: 6px; align-items: center; }
+.cdf-side .cdf-read { display: block; max-width: 220px; margin-top: 10px; }

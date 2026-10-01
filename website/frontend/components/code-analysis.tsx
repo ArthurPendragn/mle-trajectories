@@ -2,7 +2,7 @@
 
 import { Fragment, useState } from "react";
 import type { CodeAnalysis, CodeFeatures, Component } from "@/lib/types";
-import { ChangeCharts } from "./change-charts";
+import { ChangeCdf, ChangeCharts } from "./change-charts";
 
 // Kinds shown by default; the rest are building blocks (layers, data loaders, ...)
 const MAIN_KINDS = new Set(["model", "ensemble", "transformer", "pipeline", "splitter", "search", "metric"]);
@@ -225,6 +225,7 @@ export function CodeAnalysisView({ data, best, scores }: {
             <span>median similarity to the parent <b>{Math.round(s.change.similarity * 100)}%</b></span>
             <span><b>{s.change.same_code}</b> of {s.change.n} steps repeat their parent&apos;s code</span>
           </p>
+          {s.change.ratios.length > 0 && <ChangeCdf ratios={s.change.ratios} />}
           <ChangeCharts best={best} points={data.pipelines.map((p, i) => ({
             name: p.name, i, loc: p.ok ? p.size.loc : null,
             diff: data.diffs?.[p.name] ?? null, score: scores[p.name] ?? null,

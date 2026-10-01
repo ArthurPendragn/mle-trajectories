@@ -13,6 +13,9 @@ type Point = {
 };
 
 const H = 110;                       // plot height
+// marks are coloured by CSS (theme-aware); the attribute is only the fallback,
+// so a stale stylesheet shows blue marks rather than SVG's default black
+const FALLBACK = "#6f8fd0";
 const M = { top: 8, right: 8, bottom: 18, left: 44 };
 
 function niceMax(v: number): number {
@@ -53,7 +56,7 @@ function Columns({ title, points, value, width, hover, setHover, best, empty }: 
       <svg width={width} height={H + M.top + M.bottom} onMouseLeave={() => setHover(null)}>
         {ticks.map((t) => (
           <g key={t}>
-            <line x1={M.left} x2={M.left + plotW} y1={y(t)} y2={y(t)} className="chg-grid" />
+            <line x1={M.left} x2={M.left + plotW} y1={y(t)} y2={y(t)} className="chg-grid" stroke="#8888" />
             <text x={M.left - 6} y={y(t) + 3} className="chg-tick" textAnchor="end">
               {Math.round(t).toLocaleString()}
             </text>
@@ -66,9 +69,10 @@ function Columns({ title, points, value, width, hover, setHover, best, empty }: 
           const v = value(p);
           const x = M.left + i * band + (band - barW) / 2;
           if (empty?.(p)) {
-            return <circle key={p.name} cx={x + barW / 2} cy={base - 4} r={Math.min(4, Math.max(2, barW / 2))} className="chg-empty" />;
+            return <circle key={p.name} cx={x + barW / 2} cy={base - 4} r={Math.min(4, Math.max(2, barW / 2))}
+                           className="chg-empty" fill="none" stroke={FALLBACK} />;
           }
-          return v == null ? null : <path key={p.name} d={column(x, barW, y(v), base)} className="chg-bar" />;
+          return v == null ? null : <path key={p.name} d={column(x, barW, y(v), base)} className="chg-bar" fill={FALLBACK} />;
         })}
         {(bestI < 0 || (bestI + 0.5) * band > 50) && <text x={M.left} y={base + 13} className="chg-tick">step 1</text>}
         {(bestI < 0 || plotW - (bestI + 0.5) * band > 50) && (
@@ -126,3 +130,94 @@ export function ChangeCharts({ points, best }: { points: Point[]; best: string |
 }
 
 export type { Point as ChangePoint };
+
+/** numpy.percentile(..., method="linear") on sorted values. */
+function quantile(sorted: number[], q: number): number {
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+const pct = (v: number) => `${Math.round(v * 100)}%`;
+
+/** Empirical CDF of the ratio of changed code lines over every parent -> child
+ *  step, with the median, p90 and p99 dropped to both axes. */
+export function ChangeCdf({ ratios }: { ratios: number[] }) {
+  const [hover, setHover] = useState<number | null>(null);
+  const W = 390, PH = 170, m = { top: 10, right: 22, bottom: 30, left: 40 };
+  const pw = W - m.left - m.right;
+  const n = ratios.length;
+  if (n === 0) return null;
+  const xmax = Math.max(1, Math.ceil(ratios[n - 1] * 4) / 4);
+  const x = (r: number) => m.left + (r / xmax) * pw;
+  const y = (f: number) => m.top + PH - f * PH;
+  let d = `M${x(0)},${y(0)}`;
+  ratios.forEach((r, i) => { d += `H${x(r)}V${y((i + 1) / n)}`; });
+  d += `H${x(xmax)}`;
+  const marks = [
+    { q: 0.5, label: "median", dash: undefined },
+    { q: 0.9, label: "p90", dash: "5 3" },
+    { q: 0.99, label: "p99", dash: "1.5 2.5" },
+  ].map((k) => ({ ...k, v: quantile(ratios, k.q) }));
+  const xticks = Array.from({ length: Math.round(xmax / 0.25) + 1 }, (_, i) => i * 0.25)
+    .filter((t, i, a) => a.length <= 6 || i % 2 === 0);
+  const below = (r: number) => ratios.filter((v) => v <= r).length;
+
+  function move(e: React.MouseEvent<SVGRectElement>) {
+    const box = e.currentTarget.getBoundingClientRect();
+    const r = ((e.clientX - box.left) / box.width) * xmax;
+    setHover(Math.max(0, Math.min(xmax, r)));
+  }
+
+  return (
+    <div className="cdf">
+      <svg width={W} height={PH + m.top + m.bottom}>
+        {[0.5, 0.9, 0.99].map((f) => (
+          <line key={f} x1={m.left} x2={m.left + pw} y1={y(f)} y2={y(f)} className="chg-grid" stroke="#8888" />
+        ))}
+        <line x1={m.left} x2={m.left + pw} y1={y(0)} y2={y(0)} className="chg-axis" stroke="#888" />
+        {marks.map((k) => (
+          <g key={k.label} className="cdf-ref" stroke="#888">
+            <line x1={x(k.v)} x2={x(k.v)} y1={y(0)} y2={y(k.q)} strokeDasharray={k.dash} />
+            <line x1={m.left} x2={x(k.v)} y1={y(k.q)} y2={y(k.q)} strokeDasharray={k.dash} />
+          </g>
+        ))}
+        <path d={d} className="cdf-line" fill="none" stroke={FALLBACK} />
+        {[0.5, 0.9, 0.99].map((f) => (
+          <text key={f} x={m.left - 6} y={y(f) + 3} className="chg-tick" textAnchor="end">{pct(f)}</text>
+        ))}
+        {xticks.map((t) => (
+          <text key={t} x={x(t)} y={y(0) + 13} className="chg-tick" textAnchor="middle">{pct(t)}</text>
+        ))}
+        <text x={m.left + pw / 2} y={y(0) + 27} className="chg-tick" textAnchor="middle">
+          ratio of changed code lines (against the parent)
+        </text>
+        <text x={12} y={m.top + PH / 2} className="chg-tick" textAnchor="middle"
+              transform={`rotate(-90 12 ${m.top + PH / 2})`}>CDF</text>
+        {hover !== null && (
+          <g>
+            <line x1={x(hover)} x2={x(hover)} y1={m.top} y2={y(0)} className="chg-cross" stroke="#888" />
+            <circle cx={x(hover)} cy={y(below(hover) / n)} r={4} className="cdf-dot" fill={FALLBACK} />
+          </g>
+        )}
+        <rect x={m.left} y={m.top} width={pw} height={PH} fill="transparent"
+              onMouseMove={move} onMouseLeave={() => setHover(null)} />
+      </svg>
+      <div className="cdf-side small">
+        <p className="muted">{n} parent → child steps</p>
+        {marks.map((k) => (
+          <p key={k.label}>
+            <svg width="22" height="8" className="cdf-key"><line x1="0" x2="22" y1="4" y2="4" stroke="#888"
+              strokeDasharray={k.dash} strokeWidth="1.5" /></svg>
+            {k.label} <b>{pct(k.v)}</b>
+          </p>
+        ))}
+        {hover !== null && (
+          <p className="cdf-read">
+            <b>{pct(below(hover) / n)}</b> of steps changed at most <b>{pct(hover)}</b> of their parent&apos;s code lines
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}

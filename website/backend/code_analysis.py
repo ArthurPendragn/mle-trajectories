@@ -105,6 +105,8 @@ def run_code(run: Run) -> dict:
         "n": len(changed), "same_code": sum(d["same_code"] for d in diffs.values()),
         "median": statistics.median(changed), "max": max(changed),
         "similarity": round(statistics.median(d["similarity"] for d in diffs.values()), 3),
+        # every parent -> child edge's ratio of changed code lines, for the CDF
+        "ratios": sorted(d["change_ratio"] for d in diffs.values() if d["change_ratio"] is not None),
     }
     return {"covered_by": None, "pipelines": pipelines, "diffs": diffs,
             "summary": {**_aggregate(pipelines), "change": change}}

@@ -282,6 +282,7 @@ export type CodeFeatures = {
 export type CodeDiff = {
   parent: string; summary: string; same_code: boolean; similarity: number;
   lines_added: number; lines_removed: number; lines_changed: number; loc_delta: number;
+  code_lines_changed: number; change_ratio: number | null;
   components_added: string[]; components_removed: string[];
   params_changed: { component: string; param: string; old: unknown; new: unknown }[];
   imports_added: string[]; imports_removed: string[];
@@ -301,7 +302,10 @@ export type CodeSummary = {
   splitters: { name: string; n: number }[];
   pandas: Record<string, number>; polars: Record<string, number>;
   gpu: number; shell: number; inplace: number;
-  change: { n: number; same_code: number; median: number; max: number; similarity: number } | null;
+  change: {
+    n: number; same_code: number; median: number; max: number; similarity: number;
+    ratios: number[];               // every step's ratio of changed code lines, sorted
+  } | null;
 };
 
 export type CodeAnalysis = {
