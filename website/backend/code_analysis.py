@@ -59,15 +59,14 @@ def _summary(diff: dict) -> str:
     """One line for the steps table."""
     if diff["same_code"]:
         return "same code"
-    bits = [f"+{diff['lines_added']}/−{diff['lines_removed']} lines"]
-    bits += [f"+{c}" for c in diff["components_added"]]
+    bits = [f"+{c}" for c in diff["components_added"]]
     bits += [f"−{c}" for c in diff["components_removed"]]
     changed = diff["params_changed"]
     for p in changed[:3]:
         bits.append(f"{p['component']}.{p['param']} {_short(p['old'])}→{_short(p['new'])}")
     if len(changed) > 3:
         bits.append(f"{len(changed) - 3} more parameter(s)")
-    return " · ".join(bits)
+    return " · ".join(bits) or "no component or parameter change"
 
 
 def _short(v) -> str:
@@ -101,8 +100,14 @@ def run_code(run: Run) -> dict:
             d = _diff(stamps[step.parent], stamps[step.module])
             diffs[step.module] = {**d, "parent": step.parent, "summary": _summary(d)}
 
+    changed = [d["lines_changed"] for d in diffs.values()]
+    change = None if not changed else {
+        "n": len(changed), "same_code": sum(d["same_code"] for d in diffs.values()),
+        "median": statistics.median(changed), "max": max(changed),
+        "similarity": round(statistics.median(d["similarity"] for d in diffs.values()), 3),
+    }
     return {"covered_by": None, "pipelines": pipelines, "diffs": diffs,
-            "summary": _aggregate(pipelines)}
+            "summary": {**_aggregate(pipelines), "change": change}}
 
 
 def _aggregate(pipelines: list[dict]) -> dict:

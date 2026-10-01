@@ -66,7 +66,9 @@ function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff>
         <tr>
           <th>#</th><th>Pipeline</th><th>Phase</th><th>Parent</th>
           <th className="num">Score</th><th className="num">Δ parent</th>
-          {hasDiffs && <th>Code vs parent</th>}<th>Description</th>
+          {hasDiffs && <><th className="num" title="added + removed lines against the parent">Lines changed</th>
+            <th className="num" title="how much of the code is shared with the parent">Similar</th>
+            <th>Code vs parent</th></>}<th>Description</th>
         </tr>
       </thead>
       <tbody>
@@ -83,9 +85,17 @@ function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff>
               <td className={`num ${d === null ? "" : d > 0 ? "up" : d < 0 ? "down" : "muted"}`}>
                 {d === null ? "" : `${d > 0 ? "+" : ""}${fmtScore(d)}`}
               </td>
-              {hasDiffs && <td className="small code-delta" title={s.module && diffs[s.module] ? diffTitle(diffs[s.module]) : undefined}>
-                {s.module && diffs[s.module] ? diffs[s.module].summary : ""}
-              </td>}
+              {hasDiffs && (() => {
+                const d = s.module ? diffs[s.module] : undefined;
+                return <>
+                  <td className="num small">
+                    {d && (d.same_code ? <span className="muted">0</span>
+                      : <span title={`+${d.lines_added} / −${d.lines_removed}`}>{d.lines_changed}</span>)}
+                  </td>
+                  <td className="num small muted">{d ? `${Math.round(d.similarity * 100)}%` : ""}</td>
+                  <td className="small code-delta" title={d ? diffTitle(d) : undefined}>{d?.summary ?? ""}</td>
+                </>;
+              })()}
               <td className="small" title={s.desc ?? undefined}>{firstLine(s.desc)}</td>
             </tr>
           );
@@ -154,7 +164,8 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
                    afterTree={code && (
                      <section key="code" id="code">
                        <h2>Code</h2>
-                       <CodeAnalysisView data={code} best={run.best?.module ?? null} />
+                       <CodeAnalysisView data={code} best={run.best?.module ?? null}
+                         scores={Object.fromEntries(run.steps.filter((s) => s.module).map((s) => [s.module!, s.score]))} />
                      </section>
                    )} />
 

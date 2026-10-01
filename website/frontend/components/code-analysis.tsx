@@ -2,6 +2,7 @@
 
 import { Fragment, useState } from "react";
 import type { CodeAnalysis, CodeFeatures, Component } from "@/lib/types";
+import { ChangeCharts } from "./change-charts";
 
 // Kinds shown by default; the rest are building blocks (layers, data loaders, ...)
 const MAIN_KINDS = new Set(["model", "ensemble", "transformer", "pipeline", "splitter", "search", "metric"]);
@@ -81,7 +82,43 @@ function Detail({ p }: { p: CodeFeatures }) {
   );
 }
 
-export function CodeAnalysisView({ data, best }: { data: CodeAnalysis; best: string | null }) {
+/** A path with its folder muted, so the table or file names stand out. */
+function PathName({ path }: { path: string }) {
+  const cut = path.lastIndexOf("/");
+  if (cut < 0 || path.startsWith("(")) return <>{path}</>;
+  return <><span className="muted">{path.slice(0, cut + 1)}</span>{path.slice(cut + 1)}</>;
+}
+
+/** Files read, grouped under their folder when several share it, so a data
+ *  lake's long prefix is shown once and its tables below it. */
+function groupReads(reads: { path: string; n: number }[]) {
+  const dirOf = (p: string) => (p.startsWith("(") || !p.includes("/") ? null : p.slice(0, p.lastIndexOf("/") + 1));
+  const byDir = new Map<string, { path: string; n: number }[]>();
+  for (const r of reads) {
+    const d = dirOf(r.path);
+    if (d) byDir.set(d, [...(byDir.get(d) ?? []), r]);
+  }
+  const groups: { dir: string | null; files: { path: string; n: number }[]; n: number }[] = [];
+  const done = new Set<string>();
+  for (const r of reads) {                 // keep the most-read first
+    const d = dirOf(r.path);
+    if (d && (byDir.get(d)?.length ?? 0) > 1) {
+      if (!done.has(d)) {
+        done.add(d);
+        groups.push({ dir: d, files: byDir.get(d)!, n: r.n });
+      }
+    } else {
+      groups.push({ dir: null, files: [r], n: r.n });
+    }
+  }
+  return groups;
+}
+
+export function CodeAnalysisView({ data, best, scores }: {
+  data: CodeAnalysis;
+  best: string | null;
+  scores: Record<string, number | null>;
+}) {
   const [blocks, setBlocks] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
   if (data.covered_by || !data.summary || !data.pipelines) {
@@ -149,7 +186,19 @@ export function CodeAnalysisView({ data, best }: { data: CodeAnalysis; best: str
           </>}
           <h3>Files read</h3>
           <table className="small"><tbody>
-            {s.reads.slice(0, 12).map((r) => <tr key={r.path}><td className="mono clip" title={r.path}>{r.path}</td><td><Bar n={r.n} of={n} /></td></tr>)}
+            {groupReads(s.reads).map((g) => (
+              <Fragment key={g.dir ?? g.files[0].path}>
+                {g.dir && <tr className="path-dir"><td colSpan={2} className="mono muted path">{g.dir}</td></tr>}
+                {g.files.map((r) => (
+                  <tr key={r.path}>
+                    <td className={`mono path${g.dir ? " in-dir" : ""}`}>
+                      {g.dir ? r.path.slice(g.dir.length) : <PathName path={r.path} />}
+                    </td>
+                    <td><Bar n={r.n} of={n} /></td>
+                  </tr>
+                ))}
+              </Fragment>
+            ))}
           </tbody></table>
           <p className="small muted">
             GPU in {s.gpu}/{n} · <span className="mono">inplace=True</span> in {s.inplace}/{n} · shell calls in {s.shell}/{n}
@@ -167,6 +216,21 @@ export function CodeAnalysisView({ data, best }: { data: CodeAnalysis; best: str
           )}
         </div>
       </div>
+
+      {s.change && (
+        <>
+          <h3>Change along the trajectory</h3>
+          <p className="code-facts">
+            <span>median <b>{s.change.median}</b> lines changed per step <span className="muted">(max {s.change.max})</span></span>
+            <span>median similarity to the parent <b>{Math.round(s.change.similarity * 100)}%</b></span>
+            <span><b>{s.change.same_code}</b> of {s.change.n} steps repeat their parent&apos;s code</span>
+          </p>
+          <ChangeCharts best={best} points={data.pipelines.map((p, i) => ({
+            name: p.name, i, loc: p.ok ? p.size.loc : null,
+            diff: data.diffs?.[p.name] ?? null, score: scores[p.name] ?? null,
+          }))} />
+        </>
+      )}
 
       <h3>Per pipeline <span className="muted small">click a row for its components, parameters and data handling</span></h3>
       <div className="table-scroll">

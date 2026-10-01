@@ -239,3 +239,23 @@ td.code-delta { color: var(--muted); max-width: 360px; }
 .code-grid .wrap, .code-detail dd { overflow-wrap: anywhere; }
 .code-detail dl.meta { grid-template-columns: 1fr; }
 .code-detail dl.meta dt { min-width: 110px; }
+
+/* change along the trajectory */
+.chg { position: relative; margin: 4px 0 8px; }
+.chg-chart { margin: 0 0 6px; }
+.chg-chart figcaption { font-size: 12px; color: var(--muted); margin: 0 0 2px; }
+.chg-chart svg { display: block; }
+.chg-grid { stroke: var(--border); stroke-width: 1; }
+.chg-tick { font-size: 10px; fill: var(--muted); }
+.chg-bar { fill: var(--accent); }
+.chg-empty { fill: var(--surface); stroke: var(--accent); stroke-width: 1.5; }
+.chg-hover { fill: var(--badge); }
+.chg-tip {
+  position: absolute; top: 28px; transform: translateX(-50%); pointer-events: none; z-index: 3;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 9px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.12); white-space: nowrap;
+}
+.code-grid td.path { overflow-wrap: anywhere; white-space: normal; }
+.code-grid tr.path-dir td { border-bottom: none; padding-bottom: 0; font-size: 11px; }
+.code-grid td.in-dir { padding-left: 22px; }
+.chg-best { fill: var(--fg); }

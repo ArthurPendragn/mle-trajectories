@@ -61,6 +61,8 @@ def compare(parent: dict, child: dict, parent_src: str, child_src: str,
         "same_code": na is not None and na == nb,
         "similarity": round(sm.ratio(), 3),
         "lines_added": added, "lines_removed": removed,
+        # how much of the code moved: added + removed lines (a replaced line counts twice)
+        "lines_changed": added + removed,
         "loc_delta": loc(child) - loc(parent),
         "components_added": comp_added, "components_removed": comp_removed,
         "params_changed": params,

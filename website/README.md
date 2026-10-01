@@ -165,8 +165,13 @@ skrubified yet: size and structure, the models / transformers / CV splitters /
 metrics used (with how many pipelines use each and which used it first),
 libraries, files read, pandas vs polars, run-time `pip install`s, and a
 per-pipeline table whose rows open the components with their hyperparameters.
-The steps table gets a **code vs parent** column (lines changed, components
-added/removed, hyperparameters changed; the full comparison in the tooltip).
+**Change along the trajectory** charts lines changed against the parent
+(added + removed) and lines of code per step, in trajectory order, with the
+median change, median similarity and how many steps repeat their parent's
+code. The steps table gets **lines changed**, **similar** and **code vs
+parent** columns (components added/removed, hyperparameters changed; the full
+comparison in the tooltip). Files read are grouped under their folder, so a
+data lake's prefix shows once.
 
 mle-claude runs are left to the operator analysis: their pipelines are skrub
 plans over shared modules, which the operator DAG describes exactly.

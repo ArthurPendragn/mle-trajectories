@@ -26,7 +26,7 @@ python -m code_stats parent.py child.py --diff
   constants resolved (`n_splits=N_SPLITS` → 5), anything else kept as the
   expression (`=params["lr"]`); `**kwargs` is recorded as `"**"`.
 - **data**: files read and written (literal paths, f-strings, `os.path.join`,
-  `Path / ...`; `./` stripped), `df["col"] = ...` writes and distinct column
+  `Path / ...`; `./` and trailing slashes stripped, URL schemes kept), `df["col"] = ...` writes and distinct column
   names, `.loc/.iloc/.at` writes, `inplace=True`, pandas- and polars-specific
   method counts.
 - **other**: `pip install` at run time, shell calls, GPU use, seeds, prints.
@@ -44,7 +44,8 @@ library (`gc.collect()` is not polars).
 
 ## Step vs parent (`compare`)
 
-Lines added/removed and similarity (`difflib` on lines), whether the code is
+Lines added/removed, **lines changed** (added + removed; a replaced line
+counts twice) and similarity (`difflib` on lines), whether the code is
 the same once comments and formatting are ignored, components added/removed,
 hyperparameters changed (the i-th occurrence of a component against the i-th
 in the parent; a parameter missing on a side that passes `**kwargs` is not

@@ -100,12 +100,21 @@ def _string(node: ast.AST, consts: dict[str, object]) -> str | None:
 
 
 def _path(p: str | None) -> str | None:
-    """``./input/x.csv`` and ``input/x.csv`` are the same file."""
+    """``./input/x.csv`` and ``input/x.csv`` are the same file, and so are a
+    dataset folder with and without its trailing slash. URLs (``gs://``) keep
+    their scheme."""
     if p is None:
         return None
     while p.startswith("./"):
         p = p[2:]
-    return p.replace("//", "/")
+    scheme, sep, rest = p.partition("://")
+    if not sep:
+        scheme, rest = "", p
+    while "//" in rest:
+        rest = rest.replace("//", "/")
+    if len(rest) > 1:
+        rest = rest.rstrip("/")
+    return f"{scheme}://{rest}" if sep else rest
 
 
 class _Visitor(ast.NodeVisitor):
