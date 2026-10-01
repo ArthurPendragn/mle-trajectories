@@ -42,6 +42,7 @@ tools/
     skrubify/                  LLM-driven script -> DataOps converter + validator
     pipeline_analyzer/         lineage, operator DAGs, per-step diffs -> HTML report; runtime measurement
     dataset_sample/            builds sample_<size>/ from the [sample] recipe in dataset.toml
+    code_stats/                static features of a script (size, components, hyperparameters, data handling)
     trajectory.py              tabular overview of one run's final_state.json
     getcomp.sh                 one-off Kaggle download
 website/                       corpus explorer: Python registry/API + Next.js frontend (see website/README.md)

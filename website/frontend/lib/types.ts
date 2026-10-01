@@ -250,3 +250,63 @@ export type ActionsInfo = {
 };
 
 export type JobList = { jobs: Job[]; n_live: number };
+
+// --- static code analysis (backend/code_analysis.py) ------------------------- //
+export type Component = {
+  name: string; qualified: string; lib: string; kind: string;
+  line: number | null; params: Record<string, unknown>; n_args: number; network?: boolean;
+};
+
+export type CodeFeatures = {
+  name: string;
+  file: string;
+  ok: boolean;
+  error?: string;
+  size: { lines: number; loc: number; blank: number; comment: number; docstring?: number };
+  structure?: {
+    functions: number; classes: number; for: number; while: number; if: number; try: number;
+    with: number; comprehensions: number; lambdas: number; max_depth: number; complexity: number;
+  };
+  imports?: string[];
+  components?: Component[];
+  metrics?: string[];
+  data?: {
+    reads: { func: string; path: string | null; line: number }[];
+    writes: { func: string; path: string | null; line: number }[];
+    column_writes: number; loc_writes: number; inplace: number; columns_written: number;
+    pandas: Record<string, number>; polars: Record<string, number>;
+  };
+  other?: { pip_installs: string[]; shell_calls: number; gpu: boolean; seeds: string[]; prints: number };
+};
+
+export type CodeDiff = {
+  parent: string; summary: string; same_code: boolean; similarity: number;
+  lines_added: number; lines_removed: number; loc_delta: number;
+  components_added: string[]; components_removed: string[];
+  params_changed: { component: string; param: string; old: unknown; new: unknown }[];
+  imports_added: string[]; imports_removed: string[];
+  reads_added: string[]; reads_removed: string[];
+};
+
+type Dist = { median: number; min: number; max: number } | null;
+
+export type CodeSummary = {
+  n: number; n_failed: number; failed: { name: string; error: string }[];
+  loc: Dist; complexity: Dist; functions: Dist; classes: Dist; loops: Dist; ifs: Dist; tries: Dist;
+  column_writes: Dist;
+  components: { kind: string; name: string; lib: string; n: number; first: string }[];
+  libraries: { name: string; n: number }[];
+  reads: { path: string; n: number }[];
+  pip_installs: { name: string; n: number }[];
+  splitters: { name: string; n: number }[];
+  pandas: Record<string, number>; polars: Record<string, number>;
+  gpu: number; shell: number; inplace: number;
+};
+
+export type CodeAnalysis = {
+  covered_by: string | null;
+  reason?: string;
+  pipelines?: CodeFeatures[];
+  diffs?: Record<string, CodeDiff>;
+  summary?: CodeSummary;
+};

@@ -192,13 +192,14 @@ function Pending({ state, retry, retrying }: {
   );
 }
 
-export function RunAnalysis({ dataset, run, source, noSourceReason, tree, initial }: {
+export function RunAnalysis({ dataset, run, source, noSourceReason, tree, initial, afterTree }: {
   dataset: string;
   run: string;
   source: string | null;
   noSourceReason: string;
   tree: TreeData;
   initial: AnalysisStatus | null;
+  afterTree?: React.ReactNode;          // a section shown between the tree and the explorer
 }) {
   const { state, retry, retrying } = useAnalysis(dataset, run, source, initial);
   const explorer = useRef<ExplorerHandle>(null);
@@ -218,6 +219,8 @@ export function RunAnalysis({ dataset, run, source, noSourceReason, tree, initia
         {tree.modules.length === 0 ? <p className="muted">No lineage recorded for this run.</p>
           : <SearchTree tree={tree} selected={selected} onNode={onNode} />}
       </section>
+
+      {afterTree}
 
       <section>
         <h2>Operator explorer</h2>

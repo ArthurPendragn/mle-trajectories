@@ -14,6 +14,7 @@ website/
         app.py          /api/corpus, /api/runs/<dataset>/<run>[/tree|/runtime/<store>|/analysis/<source>]
         tree.py         search tree (graphviz), from the lineage alone
         runtime_profile.py  per-pipeline and per-operator time, from a runtime store
+        code_analysis.py    static code features of the original scripts (tools/code_stats)
         worker.py       operator analysis of one run+source, in its own process
         jobs.py         starts workers, caches their results in website/.cache/
         actions.py      long-running actions (build sample, runtime sweep): builds
@@ -155,6 +156,24 @@ uv run python -m website.backend.registry                 # one line per run + w
 uv run python -m website.backend.registry --run ttt-task/mlevolve_run_2
 ```
 
+## Code analysis
+
+The run page's **Code** section reads the agent's original scripts with
+`tools/code_stats` (see its README) — no import, no data, no skrub plans — so
+it is there for every MLE-STAR and mlevolve run, including the ones nobody has
+skrubified yet: size and structure, the models / transformers / CV splitters /
+metrics used (with how many pipelines use each and which used it first),
+libraries, files read, pandas vs polars, run-time `pip install`s, and a
+per-pipeline table whose rows open the components with their hyperparameters.
+The steps table gets a **code vs parent** column (lines changed, components
+added/removed, hyperparameters changed; the full comparison in the tooltip).
+
+mle-claude runs are left to the operator analysis: their pipelines are skrub
+plans over shared modules, which the operator DAG describes exactly.
+
+It runs inside the API, cached per file (path, size, mtime); the API parses
+every run once in a background thread at start (~15 s for the corpus).
+
 ## Operator analysis: background builds and cache
 
 Extracting operator DAGs imports every pipeline (skrub, stratum, torch, the
@@ -255,7 +274,7 @@ Done: registry and manifests, API, login, corpus page, run page — source and
 runtime-store pickers, search tree, operator explorer, operator statistics
 (logical, physical), runtime profile, sources and coverage, runtime stores
 (with a quiet hint when measured under an older stratum build), trajectory
-metadata, steps with Δ vs parent, actions (build sample, runtime sweep).
+metadata, steps with Δ vs parent, code analysis, actions (build sample, runtime sweep).
 
 Left out on purpose: the static report's per-step diff sections (the
 explorer's "diff vs parent" colouring covers one step on demand).

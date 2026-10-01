@@ -215,3 +215,27 @@ table.jobs button {
   font: inherit; font-size: 12px; cursor: pointer; background: var(--badge); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px; padding: 1px 8px;
 }
+
+/* code analysis */
+.code-facts { display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 13px; margin: 8px 0 4px; }
+.code-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0 24px; }
+@media (max-width: 900px) { .code-grid { grid-template-columns: 1fr; } }
+.code-grid h3 label { font-weight: 400; margin-left: 8px; }
+.share { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.share-bar { display: inline-block; width: 60px; height: 6px; background: var(--badge); border-radius: 3px; overflow: hidden; }
+.share-bar > span { display: block; height: 100%; background: var(--accent); }
+.table-scroll { overflow-x: auto; }
+.code-table td { white-space: nowrap; }
+.code-table tr.code-row { cursor: pointer; }
+.code-table tr.code-row:hover td { background: var(--badge); }
+.code-table tr.code-open > td { background: var(--bg); white-space: normal; }
+.code-detail table { margin: 6px 0; }
+.code-detail dl.meta { margin-top: 8px; }
+.expr { font-style: italic; color: var(--muted); }
+td.code-delta { color: var(--muted); max-width: 360px; }
+.code-grid table { table-layout: fixed; }
+.code-grid td.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-grid td:has(.share) { width: 110px; }
+.code-grid .wrap, .code-detail dd { overflow-wrap: anywhere; }
+.code-detail dl.meta { grid-template-columns: 1fr; }
+.code-detail dl.meta dt { min-width: 110px; }

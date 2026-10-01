@@ -13,17 +13,29 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Response
 
 from . import actions, jobs
+from .code_analysis import run_code, warm
 from .registry import (REPO_ROOT, Dataset, Metric, Run, RuntimeStore, Source, StepInfo,
                        current_stratum_commit, load_corpus)
 from .runtime_profile import build_profile
 from .tree import build_tree
 
-app = FastAPI(title="mle-trajectories", docs_url=None, redoc_url=None, openapi_url=None)
+@asynccontextmanager
+async def _lifespan(app):
+    # parse every run's scripts once in the background: the code analysis is
+    # cached per file, so the first page load of a 100-step run does not wait
+    threading.Thread(target=lambda: warm([r for ds in _corpus() for r in ds.runs]),
+                     name="code-warmup", daemon=True).start()
+    yield
+
+
+app = FastAPI(title="mle-trajectories", docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=_lifespan)
 
 
 def _rel(path: Path | None) -> str | None:
@@ -161,6 +173,12 @@ def run_tree(dataset: str, run: str, source: str | None = None) -> dict:
     r = _find_run(dataset, run)
     src, _ = r.pick_source(source)
     return build_tree(r, src)
+
+
+@app.get("/api/runs/{dataset}/{run}/code")
+def run_code_analysis(dataset: str, run: str) -> dict:
+    """Static features of the run's original scripts, and what each step changed."""
+    return run_code(_find_run(dataset, run))
 
 
 @app.get("/api/runs/{dataset}/{run}/runtime/{store}")

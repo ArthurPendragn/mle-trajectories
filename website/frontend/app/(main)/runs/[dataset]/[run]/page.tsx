@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import { notFound } from "next/navigation";
-import { getActions, getAnalysis, getRun, getRuntimeProfile, getTree } from "@/lib/dal";
+import { getActions, getAnalysis, getCode, getRun, getRuntimeProfile, getTree } from "@/lib/dal";
 import { capabilities, noPlansReason } from "@/lib/capabilities";
 import { dataLabel, firstLine, fmtScore, improvement, metricLabel } from "@/lib/format";
-import type { RunDetail, Source } from "@/lib/types";
+import type { CodeDiff, RunDetail, Source } from "@/lib/types";
+import { CodeAnalysisView } from "@/components/code-analysis";
 import { RunAnalysis } from "@/components/run-analysis";
 import { RuntimeProfile } from "@/components/runtime-profile";
 import { ActionsPanel } from "@/components/actions/panel";
@@ -15,6 +16,23 @@ export const dynamic = "force-dynamic";
 
 function one(v: string | string[] | undefined): string | undefined {
   return Array.isArray(v) ? v[0] : v;
+}
+
+function fmtValue(v: unknown): string {
+  return typeof v === "string" && v.startsWith("=") ? v.slice(1) : JSON.stringify(v);
+}
+
+/** The full step-vs-parent comparison, for the tooltip. */
+function diffTitle(d: CodeDiff): string {
+  const lines = [`vs ${d.parent}: ${Math.round(d.similarity * 100)}% similar, +${d.lines_added}/−${d.lines_removed} lines (loc ${d.loc_delta >= 0 ? "+" : ""}${d.loc_delta})`];
+  if (d.components_added.length) lines.push(`added: ${d.components_added.join(", ")}`);
+  if (d.components_removed.length) lines.push(`removed: ${d.components_removed.join(", ")}`);
+  for (const p of d.params_changed) lines.push(`${p.component}.${p.param}: ${fmtValue(p.old)} → ${fmtValue(p.new)}`);
+  if (d.imports_added.length) lines.push(`imports +${d.imports_added.join(", +")}`);
+  if (d.imports_removed.length) lines.push(`imports −${d.imports_removed.join(", −")}`);
+  if (d.reads_added.length) lines.push(`reads +${d.reads_added.join(", +")}`);
+  if (d.reads_removed.length) lines.push(`reads −${d.reads_removed.join(", −")}`);
+  return lines.join("\n");
 }
 
 function SourceRow({ s, run }: { s: Source; run: RunDetail }) {
@@ -38,7 +56,8 @@ function SourceRow({ s, run }: { s: Source; run: RunDetail }) {
   );
 }
 
-function Steps({ run }: { run: RunDetail }) {
+function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff> }) {
+  const hasDiffs = Object.keys(diffs).length > 0;
   const score = new Map(run.steps.filter((s) => s.module).map((s) => [s.module!, s.score]));
   const best = run.best?.module;
   return (
@@ -46,7 +65,8 @@ function Steps({ run }: { run: RunDetail }) {
       <thead>
         <tr>
           <th>#</th><th>Pipeline</th><th>Phase</th><th>Parent</th>
-          <th className="num">Score</th><th className="num">Δ parent</th><th>Description</th>
+          <th className="num">Score</th><th className="num">Δ parent</th>
+          {hasDiffs && <th>Code vs parent</th>}<th>Description</th>
         </tr>
       </thead>
       <tbody>
@@ -63,6 +83,9 @@ function Steps({ run }: { run: RunDetail }) {
               <td className={`num ${d === null ? "" : d > 0 ? "up" : d < 0 ? "down" : "muted"}`}>
                 {d === null ? "" : `${d > 0 ? "+" : ""}${fmtScore(d)}`}
               </td>
+              {hasDiffs && <td className="small code-delta" title={s.module && diffs[s.module] ? diffTitle(diffs[s.module]) : undefined}>
+                {s.module && diffs[s.module] ? diffs[s.module].summary : ""}
+              </td>}
               <td className="small" title={s.desc ?? undefined}>{firstLine(s.desc)}</td>
             </tr>
           );
@@ -84,11 +107,12 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
 
   // the operator analysis is started here (idempotent) so it is building by the
   // time the page is on screen; the tree and runtime profile need no build
-  const [tree, analysis, profile, actionsInfo] = await Promise.all([
+  const [tree, analysis, profile, actionsInfo, code] = await Promise.all([
     getTree(dataset, name, src ?? undefined),
     src && !noPlans ? getAnalysis(dataset, name, src, { start: true }) : Promise.resolve(null),
     rtName ? getRuntimeProfile(dataset, name, rtName) : Promise.resolve(null),
     getActions(dataset, name),
+    getCode(dataset, name),
   ]);
   const store = run.runtime.find((r) => r.name === rtName) ?? null;
   const actions = capabilities(run);
@@ -126,7 +150,13 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
       </Suspense>
 
       <RunAnalysis dataset={dataset} run={name} source={noPlans ? null : src}
-                   noSourceReason={noPlans ?? ""} tree={tree} initial={analysis} />
+                   noSourceReason={noPlans ?? ""} tree={tree} initial={analysis}
+                   afterTree={code && (
+                     <section key="code" id="code">
+                       <h2>Code</h2>
+                       <CodeAnalysisView data={code} best={run.best?.module ?? null} />
+                     </section>
+                   )} />
 
       <section id="actions">
         <h2>Actions</h2>
@@ -196,7 +226,7 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
       <section>
         <h2>Steps</h2>
         {run.steps.length === 0 ? <p className="muted">No lineage recorded for this run.</p>
-          : <Steps run={run} />}
+          : <Steps run={run} diffs={code?.diffs ?? {}} />}
       </section>
 
       {(run.warnings.length > 0 || ds.warnings.length > 0) && (

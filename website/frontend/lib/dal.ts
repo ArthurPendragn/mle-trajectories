@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { SESSION_COOKIE, decrypt } from "./session";
-import type { ActionsInfo, AnalysisStatus, Corpus, Job, RunDetail, RuntimeProfile, SampleParams,
+import type { ActionsInfo, AnalysisStatus, CodeAnalysis, Corpus, Job, RunDetail, RuntimeProfile, SampleParams,
   JobList, SamplePlan, SweepParams, SweepPlan, TreeData } from "./types";
 
 // Data access layer: the only place that talks to the Python API, and every
@@ -105,6 +105,11 @@ export async function getRun(dataset: string, run: string,
 export async function getTree(dataset: string, run: string, source?: string): Promise<TreeData> {
   await verifySession();
   return apiGet<TreeData>(`${runPath(dataset, run)}/tree${query({ source })}`);
+}
+
+export async function getCode(dataset: string, run: string): Promise<CodeAnalysis | null> {
+  await verifySession();
+  return orNull(apiGet<CodeAnalysis>(`${runPath(dataset, run)}/code`));
 }
 
 export async function getRuntimeProfile(dataset: string, run: string,
