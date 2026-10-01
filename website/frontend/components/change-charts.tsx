@@ -11,11 +11,31 @@ type Point = {
   diff: CodeDiff | null;
   score: number | null;
 };
+const TIP: React.CSSProperties = {
+  position: "absolute", top: 28, transform: "translateX(-50%)", pointerEvents: "none", zIndex: 3,
+  background: "var(--surface)", color: "var(--fg)", border: "1px solid var(--border)", borderRadius: 6,
+  padding: "6px 9px", fontSize: 12, boxShadow: "0 2px 8px rgba(0,0,0,.12)", whiteSpace: "nowrap",
+};
 
 const H = 110;                       // plot height
 // marks are coloured by CSS (theme-aware); the attribute is only the fallback,
 // so a stale stylesheet shows blue marks rather than SVG's default black
 const FALLBACK = "#6f8fd0";
+// every colour inline, from the theme variables (defined since the first
+// stylesheet), so marks and labels follow light/dark mode even when the
+// browser holds an older copy of the chart's CSS rules
+const S = {
+  grid: { stroke: "var(--border)", strokeWidth: 1 },
+  axis: { stroke: "var(--muted)", strokeWidth: 1 },
+  tick: { fill: "var(--muted)", fontSize: 10 },
+  strong: { fill: "var(--fg)", fontSize: 10 },
+  bar: { fill: "var(--accent)" },
+  empty: { fill: "var(--surface)", stroke: "var(--accent)", strokeWidth: 1.5 },
+  hover: { fill: "var(--badge)" },
+  line: { stroke: "var(--accent)", strokeWidth: 2, strokeLinejoin: "round" as const, fill: "none" },
+  ref: { stroke: "var(--muted)", strokeWidth: 1.2 },
+  dot: { fill: "var(--accent)", stroke: "var(--surface)", strokeWidth: 2 },
+};
 const M = { top: 8, right: 8, bottom: 18, left: 44 };
 
 function niceMax(v: number): number {
@@ -51,35 +71,35 @@ function Columns({ title, points, value, width, hover, setHover, best, empty }: 
   const ticks = [0, max / 2, max];
   const bestI = points.findIndex((p) => p.name === best);
   return (
-    <figure className="chg-chart">
-      <figcaption>{title}</figcaption>
+    <figure className="chg-chart" style={{ margin: "0 0 6px" }}>
+      <figcaption style={{ fontSize: 12, color: "var(--muted)", margin: "0 0 2px" }}>{title}</figcaption>
       <svg width={width} height={H + M.top + M.bottom} onMouseLeave={() => setHover(null)}>
         {ticks.map((t) => (
           <g key={t}>
-            <line x1={M.left} x2={M.left + plotW} y1={y(t)} y2={y(t)} className="chg-grid" stroke="#8888" />
-            <text x={M.left - 6} y={y(t) + 3} className="chg-tick" textAnchor="end">
+            <line x1={M.left} x2={M.left + plotW} y1={y(t)} y2={y(t)} className="chg-grid" style={S.grid} />
+            <text x={M.left - 6} y={y(t) + 3} className="chg-tick" style={S.tick} textAnchor="end">
               {Math.round(t).toLocaleString()}
             </text>
           </g>
         ))}
         {hover !== null && (
-          <rect x={M.left + hover * band} y={M.top} width={band} height={H} className="chg-hover" />
+          <rect x={M.left + hover * band} y={M.top} width={band} height={H} className="chg-hover" style={S.hover} />
         )}
         {points.map((p, i) => {
           const v = value(p);
           const x = M.left + i * band + (band - barW) / 2;
           if (empty?.(p)) {
             return <circle key={p.name} cx={x + barW / 2} cy={base - 4} r={Math.min(4, Math.max(2, barW / 2))}
-                           className="chg-empty" fill="none" stroke={FALLBACK} />;
+                           className="chg-empty" style={S.empty} />;
           }
-          return v == null ? null : <path key={p.name} d={column(x, barW, y(v), base)} className="chg-bar" fill={FALLBACK} />;
+          return v == null ? null : <path key={p.name} d={column(x, barW, y(v), base)} className="chg-bar" fill={FALLBACK} style={S.bar} />;
         })}
-        {(bestI < 0 || (bestI + 0.5) * band > 50) && <text x={M.left} y={base + 13} className="chg-tick">step 1</text>}
+        {(bestI < 0 || (bestI + 0.5) * band > 50) && <text x={M.left} y={base + 13} className="chg-tick" style={S.tick}>step 1</text>}
         {(bestI < 0 || plotW - (bestI + 0.5) * band > 50) && (
-          <text x={M.left + plotW} y={base + 13} className="chg-tick" textAnchor="end">step {points.length}</text>
+          <text x={M.left + plotW} y={base + 13} className="chg-tick" style={S.tick} textAnchor="end">step {points.length}</text>
         )}
         {bestI >= 0 && (
-          <text x={M.left + (bestI + 0.5) * band} y={base + 13} className="chg-tick chg-best" textAnchor="middle">▲ best</text>
+          <text x={M.left + (bestI + 0.5) * band} y={base + 13} className="chg-tick chg-best" style={S.strong} textAnchor="middle">▲ best</text>
         )}
         {points.map((p, i) => (
           <rect key={p.name} x={M.left + i * band} y={M.top} width={band} height={H + M.bottom}
@@ -106,7 +126,7 @@ export function ChangeCharts({ points, best }: { points: Point[]; best: string |
   const left = hover === null ? 0 : M.left + (hover + 0.5) * ((width - M.left - M.right) / points.length);
 
   return (
-    <div className="chg" ref={box}>
+    <div className="chg" ref={box} style={{ position: "relative", margin: "4px 0 8px" }}>
       <Columns title="Lines changed against the parent (added + removed; ○ same code, no bar: no parent)"
                points={points} value={(p) => p.diff?.lines_changed ?? null} width={width}
                hover={hover} setHover={setHover} best={best}
@@ -114,7 +134,7 @@ export function ChangeCharts({ points, best }: { points: Point[]; best: string |
       <Columns title="Lines of code" points={points} value={(p) => p.loc} width={width}
                hover={hover} setHover={setHover} best={best} />
       {h && (
-        <div className="chg-tip" style={{ left: Math.min(Math.max(left, 90), width - 90) }}>
+        <div className="chg-tip" style={{ ...TIP, left: Math.min(Math.max(left, 90), width - 90) }}>
           <b className="mono">{h.name}</b> <span className="muted">step {h.i + 1}</span>
           <div>
             {h.diff
@@ -170,34 +190,34 @@ export function ChangeCdf({ ratios }: { ratios: number[] }) {
   }
 
   return (
-    <div className="cdf">
+    <div className="cdf" style={{ display: "flex", flexWrap: "wrap", gap: "8px 24px", alignItems: "flex-start", margin: "4px 0 12px" }}>
       <svg width={W} height={PH + m.top + m.bottom}>
         {[0.5, 0.9, 0.99].map((f) => (
-          <line key={f} x1={m.left} x2={m.left + pw} y1={y(f)} y2={y(f)} className="chg-grid" stroke="#8888" />
+          <line key={f} x1={m.left} x2={m.left + pw} y1={y(f)} y2={y(f)} className="chg-grid" style={S.grid} />
         ))}
-        <line x1={m.left} x2={m.left + pw} y1={y(0)} y2={y(0)} className="chg-axis" stroke="#888" />
+        <line x1={m.left} x2={m.left + pw} y1={y(0)} y2={y(0)} className="chg-axis" style={S.axis} />
         {marks.map((k) => (
-          <g key={k.label} className="cdf-ref" stroke="#888">
+          <g key={k.label} className="cdf-ref" style={S.ref}>
             <line x1={x(k.v)} x2={x(k.v)} y1={y(0)} y2={y(k.q)} strokeDasharray={k.dash} />
             <line x1={m.left} x2={x(k.v)} y1={y(k.q)} y2={y(k.q)} strokeDasharray={k.dash} />
           </g>
         ))}
-        <path d={d} className="cdf-line" fill="none" stroke={FALLBACK} />
+        <path d={d} className="cdf-line" style={S.line} />
         {[0.5, 0.9, 0.99].map((f) => (
-          <text key={f} x={m.left - 6} y={y(f) + 3} className="chg-tick" textAnchor="end">{pct(f)}</text>
+          <text key={f} x={m.left - 6} y={y(f) + 3} className="chg-tick" style={S.tick} textAnchor="end">{pct(f)}</text>
         ))}
         {xticks.map((t) => (
-          <text key={t} x={x(t)} y={y(0) + 13} className="chg-tick" textAnchor="middle">{pct(t)}</text>
+          <text key={t} x={x(t)} y={y(0) + 13} className="chg-tick" style={S.tick} textAnchor="middle">{pct(t)}</text>
         ))}
-        <text x={m.left + pw / 2} y={y(0) + 27} className="chg-tick" textAnchor="middle">
+        <text x={m.left + pw / 2} y={y(0) + 27} className="chg-tick" style={S.tick} textAnchor="middle">
           ratio of changed code lines (against the parent)
         </text>
-        <text x={12} y={m.top + PH / 2} className="chg-tick" textAnchor="middle"
+        <text x={12} y={m.top + PH / 2} className="chg-tick" style={S.tick} textAnchor="middle"
               transform={`rotate(-90 12 ${m.top + PH / 2})`}>CDF</text>
         {hover !== null && (
           <g>
-            <line x1={x(hover)} x2={x(hover)} y1={m.top} y2={y(0)} className="chg-cross" stroke="#888" />
-            <circle cx={x(hover)} cy={y(below(hover) / n)} r={4} className="cdf-dot" fill={FALLBACK} />
+            <line x1={x(hover)} x2={x(hover)} y1={m.top} y2={y(0)} className="chg-cross" style={S.axis} />
+            <circle cx={x(hover)} cy={y(below(hover) / n)} r={4} className="cdf-dot" style={S.dot} />
           </g>
         )}
         <rect x={m.left} y={m.top} width={pw} height={PH} fill="transparent"
@@ -207,7 +227,7 @@ export function ChangeCdf({ ratios }: { ratios: number[] }) {
         <p className="muted">{n} parent → child steps</p>
         {marks.map((k) => (
           <p key={k.label}>
-            <svg width="22" height="8" className="cdf-key"><line x1="0" x2="22" y1="4" y2="4" stroke="#888"
+            <svg width="22" height="8" className="cdf-key"><line x1="0" x2="22" y1="4" y2="4" style={S.ref}
               strokeDasharray={k.dash} strokeWidth="1.5" /></svg>
             {k.label} <b>{pct(k.v)}</b>
           </p>
