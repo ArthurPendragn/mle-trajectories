@@ -1,0 +1,90 @@
+import numpy as np
+import pandas as pd
+import skrub
+from sklearn.model_selection import StratifiedKFold
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
+from lightgbm import LGBMClassifier
+
+TRAIN_PATH = '/home/estrauss-ldap/repos/mle-trajectories/tab_playground_dec_21/input/train.csv'
+CLASS_COUNTS = {1: 1468136, 2: 2262087, 3: 195712, 4: 377, 5: 1, 6: 11426, 7: 62261}
+
+def locked_setup_entry():
+    data = skrub.as_data_op(TRAIN_PATH).skb.apply_func(pd.read_csv)
+    data = data.sort_values('Id').reset_index(drop=True)
+    rng = skrub.as_data_op(42).skb.apply_func(np.random.default_rng)
+    pieces = []
+    for label, count in CLASS_COUNTS.items():
+        sample_size = max(1, int(np.floor(0.1 * count + 0.5)))
+        positions = rng.choice(count, size=sample_size, replace=False)
+        class_rows = data[data['Cover_Type'] == label]
+        pieces.append(class_rows.iloc[positions])
+    rows = pieces[0].skb.concat(pieces[1:], axis=0)
+    rows = rows.sort_values('Id').reset_index(drop=True)
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+    X = rows.drop(columns=['Id', 'Cover_Type']).skb.mark_as_X(cv=cv, split_kwargs={})
+    y = rows['Cover_Type'].skb.mark_as_y()
+    return {'X': X, 'y': y, 'scoring': 'accuracy', 'row_keys': rows['Id'], 'audit': {'class_counts': rows['Cover_Type'].value_counts().sort_index(), 'sample_shape': rows.shape, 'id_bounds': rows['Id'].agg(['min', 'max'])}}
+
+def build_evaluation():
+    return locked_setup_entry()
+
+class StratifiedFractionClassifier(ClassifierMixin, BaseEstimator):
+    def __init__(self, estimator=None, fraction=1.0, random_state=42):
+        self.estimator = estimator
+        self.fraction = fraction
+        self.random_state = random_state
+
+    def fit(self, X, y):
+        labels = np.asarray(y).reshape(-1)
+        rng = np.random.default_rng(self.random_state)
+        selected = []
+        for label in np.unique(labels):
+            indices = np.flatnonzero(labels == label)
+            permutation = rng.permutation(indices)
+            count = max(1, int(np.floor(self.fraction * len(indices) + 0.5)))
+            selected.append(permutation[:count])
+        positions = np.sort(np.concatenate(selected))
+        self.training_class_counts_ = dict(zip(*np.unique(labels[positions], return_counts=True)))
+        self.training_row_count_ = len(positions)
+        self.estimator_ = clone(self.estimator)
+        train_X = X.iloc[positions] if hasattr(X, 'iloc') else X[positions]
+        train_y = y.iloc[positions] if hasattr(y, 'iloc') else np.asarray(y)[positions]
+        self.estimator_.fit(train_X, train_y)
+        self.classes_ = self.estimator_.classes_
+        self.n_features_in_ = self.estimator_.n_features_in_
+        return self
+
+    def predict(self, X):
+        return self.estimator_.predict(X)
+
+    def predict_proba(self, X):
+        return self.estimator_.predict_proba(X)
+
+def build():
+    setup = build_evaluation()
+    X = setup['X']
+    h = X['Horizontal_Distance_To_Hydrology'].astype('float64')
+    v = X['Vertical_Distance_To_Hydrology'].astype('float64')
+    r = X['Horizontal_Distance_To_Roadways'].astype('float64')
+    f = X['Horizontal_Distance_To_Fire_Points'].astype('float64')
+    e = X['Elevation'].astype('float64')
+    geometry = X.assign(
+        Hydrology_Euclidean_Distance=h.skb.apply_func(np.hypot, v),
+        Hydrology_Elevation=e - v,
+        Hydrology_Minus_Roadways=h - r,
+        Hydrology_Minus_Fire_Points=h - f,
+        Roadways_Minus_Fire_Points=r - f)
+    wilderness_count = X[[f'Wilderness_Area{i}' for i in range(1, 5)]].sum(axis=1)
+    soil_count = X[[f'Soil_Type{i}' for i in range(1, 41)]].sum(axis=1)
+    features = geometry.assign(
+        Wilderness_Activation_Count=wilderness_count,
+        Soil_Activation_Count=soil_count)
+    base = LGBMClassifier(
+        objective='multiclass', n_estimators=350, learning_rate=0.07,
+        num_leaves=63, min_child_samples=300, max_bin=511,
+        colsample_bytree=1.0, subsample=1.0, reg_lambda=1.0,
+        random_state=42, verbosity=-1, n_jobs=4)
+    fraction = skrub.choose_from([0.25, 0.5, 1.0], name='enriched_training_fraction')
+    model = StratifiedFractionClassifier(estimator=base, fraction=fraction, random_state=42)
+    pred = features.skb.apply(model, y=setup['y'])
+    return {'pred': pred, 'scoring': setup['scoring'], 'row_keys': setup['row_keys']}

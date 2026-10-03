@@ -1,0 +1,3 @@
+agent = "nano-mle"
+label = "nano-mle (Gemini 3.8 Flash, high reasoning, 4h, window memory, 16 cores)"
+note = "nano-mle greedy search, model gemini/gemini-3.8-flash (reasoning high). 9 scored expansions, 0 failed. Locked accuracy on 4000000 rows. Plans read task sources by absolute path."

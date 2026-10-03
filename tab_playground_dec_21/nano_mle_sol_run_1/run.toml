@@ -1,0 +1,3 @@
+agent = "nano-mle"
+label = "nano-mle run 1 (gpt-6.1-sol)"
+note = "nano-mle greedy search, model openai/gpt-6.1-sol. 12 scored expansions, 0 failed. Locked accuracy on 400002 rows. Plans read task sources by absolute path."

@@ -1,0 +1,8 @@
+scored_at = 2026-10-04
+note = "Kaggle private leaderboard (after deadline); public 0.95634"
+
+[final]                        # the submission written at the end of the run
+score = 0.95610
+pipeline = "pipeline_08"
+file = "submission.csv"
+note = "candidate expansion_0f878ed4778a_variant_1"
