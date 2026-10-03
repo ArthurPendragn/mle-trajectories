@@ -1,4 +1,4 @@
-# mle-trajectories
+œ# mle-trajectories
 
 Development trajectories of ML engineering agents (MLE-STAR, mlevolve, Claude
 Code), collected per dataset, plus tooling to compare the pipelines they produce.
@@ -14,9 +14,12 @@ iteration, and what it kept.
 <dataset>/
     get_data.sh       fetch the data into input/ (Kaggle datasets only)
     DATA.md           where the data comes from, when a script cannot fetch it
-    make_sample.py    build sample/input/ from input/ (per dataset)
+    dataset.toml      dataset facts, incl. the [sample] recipe
+    make_sample.py    custom sampler, only where the [sample] recipe is not enough
     input/            the full data, gitignored
-    sample/input/     a small self-consistent sample, gitignored
+    sample_<size>/
+        input/                a self-consistent sample, same file names, gitignored
+        sample_manifest.json  how it was built (tracked)
     <agent>_run_<n>/
         pipelines/        the agent's original scripts, untouched
         final_state.json  its state dump / journal (format depends on the agent)
@@ -27,8 +30,8 @@ iteration, and what it kept.
 
 Pipelines read `./input/...`, and both `skrubify --run-in` and
 `pipeline_analyzer.runtime --run-in` take the directory *holding* that `input/`.
-So `--run-in <dataset>` runs against full data and `--run-in <dataset>/sample`
-against the sample, with no edit to any pipeline.
+So `--run-in <dataset>` runs against full data and
+`--run-in <dataset>/sample_<size>` against a sample, with no edit to any pipeline.
 
 Four datasets are Kaggle competitions and have a `get_data.sh` (it formalises
 what `tools/getcomp.sh` did by hand, minus the assumption that every file is a
@@ -53,9 +56,11 @@ into 17 tables), `ttt-task` (TrackTheTrackers), `beaver_enroll` (the BEAVER
 benchmark, not present here).
 
 Full data is the wrong size for skrubify's repair loop, which runs the candidate
-*and* the original once per round. The `dataset-sample` skill writes a
-per-dataset `make_sample.py` producing `sample/input/`; `ttt-task/make_input_sample.py`
-is the worked example. The data is gitignored, so `sample/sample_manifest.json`
+*and* the original once per round. `python -m dataset_sample <dataset> --size 100k`
+builds `sample_100k/input/` from the `[sample]` recipe in `dataset.toml` (see
+[`tools/dataset_sample`](tools/dataset_sample)); the `dataset-sample` skill says
+how to choose a recipe, or write a `make_sample.py` where one is not enough. The
+data is gitignored, so `sample_<size>/sample_manifest.json`
 — sizes, knobs, seed, row counts before and after — is the record of what any
 sampled number was measured on.
 
@@ -163,6 +168,6 @@ Notes on the counts:
 - [`tools/getcomp.sh`](tools/getcomp.sh) — one-off Kaggle competition fetch into
   `<dir>/input/`; the per-dataset `get_data.sh` scripts are the wired-up version.
 - [`.claude/skills/dataset-sample`](.claude/skills/dataset-sample) — skill: given a
-  dataset folder, write its `make_sample.py` and build `sample/input/` so a run
+  dataset folder, choose its `[sample]` recipe and build `sample_<size>/input/` so a run
   in the repair loop takes about a minute. (Claude Code only discovers skills
   under `.claude/skills/`, which is why it does not live in `tools/`.)

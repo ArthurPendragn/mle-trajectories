@@ -28,6 +28,14 @@ export function createExplorer(root, D, hooks) {
   "use strict";
   hooks = hooks || {};
   function $(k) { return root.querySelector('[data-pa="' + k + '"]'); }
+  // Every listener goes through on(), so destroy() removes them all. The DOM
+  // outlives the engine (React re-runs the effect on the same nodes -- twice in
+  // dev's StrictMode), and a listener left behind doubles each click: two
+  // full-screen handlers left the page stuck in the overlay.
+  var listeners = new AbortController();
+  function on(el, type, fn, opts) {
+    el.addEventListener(type, fn, Object.assign({ signal: listeners.signal }, opts));
+  }
   var P = D.pipelines, N = D.nodes;
   var NP = P.length;
 
@@ -608,7 +616,7 @@ export function createExplorer(root, D, hooks) {
     fsSync();
   }
 
-  fsBtn.addEventListener("click", function () {
+  on(fsBtn, "click", function () {
     if (fsActive()) {
       if (document.fullscreenElement === explorer) document.exitFullscreen();
       else fsOverlay(false);
@@ -627,10 +635,10 @@ export function createExplorer(root, D, hooks) {
   function onKey(e) {
     if (e.key === "Escape" && explorer.classList.contains("pa-fs")) fsOverlay(false);
   }
-  document.addEventListener("fullscreenchange", fsSync);
-  document.addEventListener("keydown", onKey);
+  on(document, "fullscreenchange", fsSync);
+  on(document, "keydown", onKey);
 
-  svg.addEventListener("wheel", function (e) {
+  on(svg, "wheel", function (e) {
     e.preventDefault();
     var r = svg.getBoundingClientRect();
     var vb = svg.viewBox.baseVal;
@@ -646,7 +654,7 @@ export function createExplorer(root, D, hooks) {
   }, { passive: false });
 
   var drag = null;
-  svg.addEventListener("pointerdown", function (e) {
+  on(svg, "pointerdown", function (e) {
     // The element under the pointer has to be remembered here: capturing the
     // pointer on the svg retargets every later event (pointerup included) to
     // the svg itself, so ``e.target`` there is never the node that was hit.
@@ -654,7 +662,7 @@ export function createExplorer(root, D, hooks) {
              hit: e.target.closest ? e.target.closest(".pa-n, .pa-g") : null };
     svg.setPointerCapture(e.pointerId);
   });
-  svg.addEventListener("pointermove", function (e) {
+  on(svg, "pointermove", function (e) {
     if (!drag) return;
     var r = svg.getBoundingClientRect(), vb = svg.viewBox.baseVal;
     var s = vb.width / r.width || 1;
@@ -663,7 +671,7 @@ export function createExplorer(root, D, hooks) {
     view.x = drag.vx + dx; view.y = drag.vy + dy;
     applyView();
   });
-  svg.addEventListener("pointerup", function () {
+  on(svg, "pointerup", function () {
     var d = drag;
     drag = null;
     if (!d || d.moved) return;
@@ -714,23 +722,23 @@ export function createExplorer(root, D, hooks) {
     if (g && expanded.has(g.top)) {
       box.innerHTML += '<p><button data-collapse="' + g.top + '">collapse its group (' +
         g.members.length + " operations)</button></p>";
-      box.querySelector("button[data-collapse]").addEventListener("click", function () {
+      on(box.querySelector("button[data-collapse]"), "click", function () {
         expanded.delete(g.top);
         draw();
         pick(id);
       });
     }
     box.querySelectorAll("input[data-pipe]").forEach(function (cb) {
-      cb.addEventListener("change", function () {
+      on(cb, "change", function () {
         toggle(+cb.getAttribute("data-pipe"), cb.checked);
       });
     });
     var det = box.querySelector("details");
-    if (det) det.addEventListener("toggle", function () { inspectOpen = det.open; });
+    if (det) on(det, "toggle", function () { inspectOpen = det.open; });
     // A chip's link jumps to that pipeline's section; without this the click
     // would bubble to the surrounding label and tick the pipeline as well.
     box.querySelectorAll(".pa-chip a").forEach(function (a) {
-      a.addEventListener("click", function (e) { e.stopPropagation(); });
+      on(a, "click", function (e) { e.stopPropagation(); });
     });
     applyPicked();
   }
@@ -810,20 +818,20 @@ export function createExplorer(root, D, hooks) {
     });
     list.innerHTML = html;
     list.querySelectorAll("input[data-pipe]").forEach(function (cb) {
-      cb.addEventListener("change", function () {
+      on(cb, "change", function () {
         toggle(+cb.getAttribute("data-pipe"), cb.checked);
       });
     });
     list.querySelectorAll(".pa-row").forEach(function (row) {
       var pi = +row.getAttribute("data-pipe");
-      row.addEventListener("mouseenter", function () { hover = pi; applyHover(); });
-      row.addEventListener("mouseleave", function () { hover = -1; applyHover(); });
+      on(row, "mouseenter", function () { hover = pi; applyHover(); });
+      on(row, "mouseleave", function () { hover = -1; applyHover(); });
     });
     list.querySelectorAll(".pa-row .jump").forEach(function (a) {
-      a.addEventListener("click", function (e) { e.stopPropagation(); });
+      on(a, "click", function (e) { e.stopPropagation(); });
     });
     list.querySelectorAll("button[data-phase]").forEach(function (b) {
-      b.addEventListener("click", function (e) {
+      on(b, "click", function (e) {
         e.preventDefault();
         var g = b.getAttribute("data-phase"), on = b.getAttribute("data-on") === "1";
         P.forEach(function (p, i) {
@@ -898,55 +906,55 @@ export function createExplorer(root, D, hooks) {
   // ---- wiring --------------------------------------------------------------
   buildList();
 
-  $("all").addEventListener("click", function () {
+  on($("all"), "click", function () {
     setSel(okIdx.slice());
   });
-  $("none").addEventListener("click", function () {
+  on($("none"), "click", function () {
     setSel([]);
   });
-  $("invert").addEventListener("click", function () {
+  on($("invert"), "click", function () {
     setSel(okIdx.filter(function (i) { return !sel.has(i); }));
   });
-  $("best").addEventListener("click", function () {
+  on($("best"), "click", function () {
     var b = bestPipeline();
     setSel(b < 0 ? okIdx.slice(0, 1) : pathToRoot(b));
   });
-  $("roots").addEventListener("click", function () {
+  on($("roots"), "click", function () {
     setSel(okIdx.filter(function (i) {
       return P[i].p === null || P[i].p === undefined;
     }));
   });
-  $("fit").addEventListener("click", fit);
-  $("zin").addEventListener("click", function () { zoomBy(1.4); });
-  $("zout").addEventListener("click", function () { zoomBy(1 / 1.4); });
-  $("mode").addEventListener("change", function (e) {
+  on($("fit"), "click", fit);
+  on($("zin"), "click", function () { zoomBy(1.4); });
+  on($("zout"), "click", function () { zoomBy(1 / 1.4); });
+  on($("mode"), "change", function (e) {
     mode = e.target.value;
     identColors();
     syncList();
     draw();
   });
-  $("expand").addEventListener("click", function () {
+  on($("expand"), "click", function () {
     Object.keys(groupByVid).forEach(function (v) { expanded.add(groupByVid[v].top); });
     draw();
   });
-  $("collapse").addEventListener("click", function () {
+  on($("collapse"), "click", function () {
     expanded.clear();
     draw();
   });
-  $("grouping").addEventListener("change", function (e) {
+  on($("grouping"), "change", function (e) {
     grouping = e.target.checked;
     $("collapse-est").disabled = !grouping;
     draw();
   });
-  $("sources-top").addEventListener("change", function (e) {
+  on($("sources-top"), "change", function (e) {
     bottomUp = !e.target.checked;
     draw();
   });
-  $("collapse-est").addEventListener("change", function (e) {
+  on($("collapse-est"), "change", function (e) {
     collapseEst = e.target.checked;
     draw();
   });
-  $("filter").addEventListener("input", function (e) {
+  on($("filter"), "input", function (e) {
     var q = e.target.value.toLowerCase();
     list.querySelectorAll(".pa-row").forEach(function (row) {
       var pi = +row.getAttribute("data-pipe");
@@ -992,8 +1000,7 @@ export function createExplorer(root, D, hooks) {
       return true;
     },
     destroy: function () {
-      document.removeEventListener("fullscreenchange", fsSync);
-      document.removeEventListener("keydown", onKey);
+      listeners.abort();
       if (fsActive()) {
         if (document.fullscreenElement === explorer) document.exitFullscreen();
         else fsOverlay(false);

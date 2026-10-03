@@ -13,6 +13,16 @@ export function improvement(score: number | null, parent: number | null,
   return metric.lower_is_better ? -d : d;
 }
 
+/** Test minus validation, oriented so positive = the test score is better. */
+export function gap(test: number | null | undefined, val: number | null | undefined,
+                    metric: Metric): number | null {
+  return test == null || val == null ? null : improvement(test, val, metric);
+}
+
+export function fmtSigned(x: number | null): string {
+  return x === null ? "" : `${x > 0 ? "+" : ""}${fmtScore(x)}`;
+}
+
 export function metricLabel(m: Metric): string {
   const arrow = m.lower_is_better === true ? " ↓" : m.lower_is_better === false ? " ↑" : "";
   return `${m.name ?? "metric ?"}${arrow}`;

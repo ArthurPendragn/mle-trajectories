@@ -8,6 +8,11 @@ TOML files record only what the folder cannot say:
 * ``<dataset>/<run>/run.toml`` -- which agent produced the run, notes, and
   annotations on its pipeline sources (the main one, folders to leave out, ...).
 
+A third, optional file holds what only the held-out labels can tell:
+
+* ``<dataset>/<run>/test_scores.toml`` -- the run's score on the secret test
+  set, computed outside the repo (the labels are never committed).
+
 Everything a view or an action needs to decide whether it is available is in
 :meth:`Run.facts`; nothing here imports skrub, stratum or a pipeline, so building
 the registry takes well under a second and can be redone on every request.
@@ -31,7 +36,9 @@ from pathlib import Path
 from dataset_sample._manifest import MANIFEST, fingerprint, is_sample
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-AGENTS = ("mle-star", "mlevolve", "mle-claude")
+AGENTS = ("mle-star", "mlevolve", "mle-claude", "nano-mle")
+# Agents whose pipelines are skrub plans already, with lineage in pipelines/results.json.
+SKRUB_PLAN_AGENTS = ("mle-claude", "nano-mle")
 TRAJECTORY_FILES = ("final_state.json", "journal_slim.json")
 
 _DATASET_KEYS = {"label", "task", "data", "note", "metric", "defaults", "sample"}
@@ -41,6 +48,9 @@ _RUN_KEYS = {"agent", "label", "note", "trajectory", "originals", "metric", "sou
 _SOURCE_KEYS = {"label", "dirs", "default", "fold_identical_code", "hidden", "note"}
 _RUNTIME_KEYS = {"label", "default", "hidden", "note"}
 _METRIC_KEYS = {"name", "lower_is_better"}
+TEST_SCORES_FILE = "test_scores.toml"
+_TEST_KEYS = {"metric", "scored_at", "note", "final", "steps"}
+_TEST_FINAL_KEYS = {"score", "pipeline", "file", "note"}
 
 
 def _load_trajectory_module():
@@ -105,6 +115,21 @@ class StepInfo:
     phase: str | None
     score: float | None
     desc: str | None = None
+    test_score: float | None = None    # from test_scores.toml, filled in by load_run
+
+
+@dataclass
+class TestScores:
+    """Scores on the held-out test labels (``test_scores.toml``), entered by hand
+    or by a scoring script that reads the labels from outside the repo."""
+    metric: str | None = None          # None: the run's own metric
+    scored_at: str | None = None
+    note: str | None = None
+    final: float | None = None         # the submission the agent handed in
+    final_pipeline: str | None = None  # the step that produced it
+    final_file: str | None = None      # the predictions scored, relative to the run
+    final_note: str | None = None
+    steps: dict[str, float] = field(default_factory=dict)   # module -> test score
 
 
 @dataclass
@@ -198,6 +223,7 @@ class Run:
     sources: list[Source] = field(default_factory=list)   # skrub plan sources
     runtime: list[RuntimeStore] = field(default_factory=list)
     steps: list[StepInfo] = field(default_factory=list)
+    test: TestScores | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -208,7 +234,7 @@ class Run:
     def lineage_from(self) -> str | None:
         if self.trajectory_file:
             return "trajectory"
-        if self.agent == "mle-claude" and self.steps:
+        if self.agent in SKRUB_PLAN_AGENTS and self.steps:
             return "results.json"
         return None
 
@@ -288,6 +314,7 @@ class Run:
         return {
             "agent": self.agent,
             "trajectory": self.trajectory_file is not None,
+            "test_scores": self.test is not None,
             "lineage": self.lineage_from,
             "steps": len(self.steps),
             "originals": len(self.originals.files) if self.originals else 0,
@@ -372,6 +399,53 @@ def _steps_from_results(path: Path, warnings: list[str]) -> tuple[list[StepInfo]
              for r in rows if isinstance(r, dict) and r.get("pipeline")]
     names = {r.get("metric") for r in rows if isinstance(r, dict) and r.get("metric")}
     return steps, Metric(name=names.pop() if len(names) == 1 else None)
+
+
+def _num(v) -> float | None:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _load_test_scores(run: Run) -> None:
+    """``test_scores.toml``: the final submission's test score and, where the run
+    kept predictions per step, each step's. Per-step scores land on the steps."""
+    path = run.path / TEST_SCORES_FILE
+    if not path.is_file():
+        return
+    w = run.warnings
+    raw = _read_toml(path, _TEST_KEYS, w)
+    final = raw.get("final") if isinstance(raw.get("final"), dict) else {}
+    for key in sorted(set(final) - _TEST_FINAL_KEYS):
+        w.append(f"{path.name} [final]: unknown key {key!r}")
+    steps_raw = raw.get("steps") if isinstance(raw.get("steps"), dict) else {}
+    steps = {}
+    for name, v in steps_raw.items():
+        if _num(v) is None:
+            w.append(f"{path.name} [steps]: {name} is not a number")
+        else:
+            steps[name] = _num(v)
+    t = TestScores(metric=raw.get("metric"),
+                   scored_at=str(raw["scored_at"]) if raw.get("scored_at") else None,
+                   note=raw.get("note"), final=_num(final.get("score")),
+                   final_pipeline=final.get("pipeline"), final_file=final.get("file"),
+                   final_note=final.get("note"), steps=steps)
+    if final and t.final is None:
+        w.append(f"{path.name} [final]: score missing or not a number")
+    if t.final is None and t.final_pipeline in steps:
+        t.final = steps[t.final_pipeline]
+    elif t.final is not None and t.final_pipeline and t.final_pipeline not in steps:
+        steps[t.final_pipeline] = t.final
+    known = set(run.modules)
+    if known:
+        unknown = sorted(set(steps) - known)
+        if unknown:
+            w.append(f"{path.name}: {len(unknown)} pipeline(s) not in the lineage "
+                     f"(e.g. {unknown[0]})")
+    if t.final_file and not (run.path / t.final_file).resolve().is_relative_to(run.path.resolve()):
+        w.append(f"{path.name} [final] file: {t.final_file!r} is outside the run folder")
+    for s in run.steps:
+        if s.module in steps:
+            s.test_score = steps[s.module]
+    run.test = t
 
 
 def _load_runtime(run: Run, commit: str | None, annotations: dict) -> None:
@@ -464,8 +538,8 @@ def load_run(dataset: Dataset, path: Path, commit: str | None = None) -> Run:
         orig_dirs = _py_subdirs(path / "pipelines") if (path / "pipelines").is_dir() else []
     if orig_dirs:
         run.originals = Source(name="pipelines", dirs=orig_dirs,
-                               skrub=agent == "mle-claude",
-                               label="agent's plans" if agent == "mle-claude" else "originals",
+                               skrub=agent in SKRUB_PLAN_AGENTS,
+                               label="agent's plans" if agent in SKRUB_PLAN_AGENTS else "originals",
                                files=_index_files(orig_dirs))
 
     # --- lineage: a trajectory, or mle-claude's results.json -----------------
@@ -484,18 +558,18 @@ def load_run(dataset: Dataset, path: Path, commit: str | None = None) -> Run:
             run.steps = [StepInfo(s.module, s.parent, s.phase, s.score, s.desc)
                          for s in t.steps]
             derived_metric = Metric(lower_is_better=t.lower_is_better)
-    elif agent == "mle-claude" and run.originals:
+    elif agent in SKRUB_PLAN_AGENTS and run.originals:
         results = run.originals.dirs[0] / "results.json"
         if results.is_file():
             run.steps, derived_metric = _steps_from_results(results, warnings)
         else:
-            warnings.append("mle-claude run without pipelines/results.json: no lineage")
+            warnings.append(f"{agent} run without pipelines/results.json: no lineage")
     run.metric = _merge_metric(_metric(cfg.get("metric"), "run.toml", warnings),
                                derived_metric, dataset.metric)
 
     # --- skrub plan sources ---------------------------------------------------
     annotations = cfg.get("sources") or {}
-    if agent == "mle-claude" and run.originals:
+    if agent in SKRUB_PLAN_AGENTS and run.originals:
         run.sources.append(run.originals)
     for folder in sorted(p for p in path.glob("skrubify*") if p.is_dir()):
         ann = annotations.get(folder.name) or {}
@@ -520,6 +594,7 @@ def load_run(dataset: Dataset, path: Path, commit: str | None = None) -> Run:
         if missing:
             warnings.append(f"{len(missing)} pipeline(s) named by the lineage have no "
                             f"original file (e.g. {missing[0]})")
+    _load_test_scores(run)
     _load_runtime(run, commit, cfg.get("runtime") or {})
     return run
 
@@ -570,6 +645,13 @@ def _fmt_score(run: Run) -> str:
     return "—" if b is None else f"{b.score:.5g}"
 
 
+def _fmt_test(run: Run) -> str:
+    t = run.test
+    if t is None:
+        return "—"
+    return "?" if t.final is None else f"{t.final:.5g}"
+
+
 def _fmt_sources(run: Run) -> str:
     src = run.default_source()
     if src is None:
@@ -587,10 +669,11 @@ def _fmt_runtime(run: Run) -> str:
 
 
 def _print_table(corpus: list[Dataset]) -> None:
-    rows = [("run", "agent", "steps", "best", "lineage", "skrub plans", "runtime", "data", "!")]
+    rows = [("run", "agent", "steps", "best", "test", "lineage", "skrub plans", "runtime", "data", "!")]
     for ds in corpus:
         for r in ds.runs:
             rows.append((r.id, r.agent or "?", str(len(r.steps)), _fmt_score(r),
+                         _fmt_test(r),
                          r.lineage_from or "—", _fmt_sources(r), _fmt_runtime(r),
                          ds.data_status(), str(len(r.warnings) + len(ds.warnings)) if
                          (r.warnings or ds.warnings) else ""))
@@ -617,6 +700,13 @@ def _print_run(run: Run) -> None:
     print(f"  lineage: {run.lineage_from or 'none'}"
           + (f" from {run.trajectory_file.name}" if run.trajectory_file else "")
           + f", {len(run.steps)} steps, best {_fmt_score(run)}")
+    if run.test:
+        t = run.test
+        print(f"  test: {_fmt_test(run)}"
+              + (f" ({t.final_pipeline})" if t.final_pipeline else "")
+              + (f", {len(t.steps)} step(s) scored" if t.steps else "")
+              + (f", metric {t.metric}" if t.metric else "")
+              + (f", scored {t.scored_at}" if t.scored_at else ""))
     if run.originals:
         print(f"  originals: {len(run.originals.files)} files in "
               f"{', '.join(run.originals.rel_dirs(run.path))}")

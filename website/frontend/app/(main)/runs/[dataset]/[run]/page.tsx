@@ -3,7 +3,7 @@ import { Suspense } from "react";
 import { notFound } from "next/navigation";
 import { getActions, getAnalysis, getCode, getRun, getRuntimeProfile, getTree } from "@/lib/dal";
 import { capabilities, noPlansReason } from "@/lib/capabilities";
-import { dataLabel, firstLine, fmtScore, improvement, metricLabel } from "@/lib/format";
+import { dataLabel, firstLine, fmtScore, fmtSigned, gap, improvement, metricLabel } from "@/lib/format";
 import type { CodeDiff, RunDetail, Source } from "@/lib/types";
 import { CodeAnalysisView } from "@/components/code-analysis";
 import { RunAnalysis } from "@/components/run-analysis";
@@ -11,6 +11,7 @@ import { RuntimeProfile } from "@/components/runtime-profile";
 import { ActionsPanel } from "@/components/actions/panel";
 import { SelectionBar } from "@/components/selection-bar";
 import { StaleHint } from "@/components/stale-hint";
+import { TestScore } from "@/components/test-score";
 
 export const dynamic = "force-dynamic";
 
@@ -60,12 +61,15 @@ function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff>
   const hasDiffs = Object.keys(diffs).length > 0;
   const score = new Map(run.steps.filter((s) => s.module).map((s) => [s.module!, s.score]));
   const best = run.best?.module;
+  const submitted = run.test?.final?.pipeline;
+  const hasTest = run.steps.some((s) => s.test_score !== null);
   return (
     <table>
       <thead>
         <tr>
           <th>#</th><th>Pipeline</th><th>Phase</th><th>Parent</th>
-          <th className="num">Score</th><th className="num">Δ parent</th>
+          <th className="num" title="the agent's own validation score">Score</th><th className="num">Δ parent</th>
+          {hasTest && <th className="num" title="score on the held-out test labels; small: test − validation, + = better">Test</th>}
           {hasDiffs && <><th className="num" title="added + removed lines against the parent">Lines changed</th>
             <th className="num" title="changed code lines (blank and comment lines ignored) as a share of the parent's code lines">Changed</th>
             <th>Code vs parent</th></>}<th>Description</th>
@@ -78,13 +82,24 @@ function Steps({ run, diffs }: { run: RunDetail; diffs: Record<string, CodeDiff>
             <tr key={i} id={s.module ? `step-${s.module}` : undefined}
                 className={s.module === best ? "best" : s.module ? "" : "muted"}>
               <td className="num muted">{i + 1}</td>
-              <td className="mono small">{s.module ?? "(no code kept)"}</td>
+              <td className="mono small">
+                {s.module ?? "(no code kept)"}
+                {s.module && s.module === submitted && <span className="badge" title="the submission the agent handed in">submitted</span>}
+              </td>
               <td>{s.phase ?? ""}</td>
               <td className="mono small muted">{s.parent ?? ""}</td>
               <td className="num">{fmtScore(s.score)}</td>
               <td className={`num ${d === null ? "" : d > 0 ? "up" : d < 0 ? "down" : "muted"}`}>
                 {d === null ? "" : `${d > 0 ? "+" : ""}${fmtScore(d)}`}
               </td>
+              {hasTest && (() => {
+                // other test metric: the scores are not comparable, so no gap
+                const g = run.test?.metric ? null : gap(s.test_score, s.score, run.metric);
+                return <td className="num">
+                  {s.test_score !== null && fmtScore(s.test_score)}
+                  {g !== null && <span className={`small ${g >= 0 ? "up" : "down"}`}> {fmtSigned(g)}</span>}
+                </td>;
+              })()}
               {hasDiffs && (() => {
                 const d = s.module ? diffs[s.module] : undefined;
                 return <>
@@ -142,8 +157,10 @@ export default async function RunPage({ params, searchParams }: PageProps<"/runs
         <div><span className="muted">lineage</span>
           {run.lineage ? `${run.lineage}${run.trajectory ? ` (${run.trajectory.file})` : ""}` : "none"}</div>
         <div><span className="muted">steps</span>{run.n_steps}</div>
-        <div><span className="muted">best</span>
+        <div><span className="muted">best (validation)</span>
           {fmtScore(run.best?.score)} <span className="mono small muted">{run.best?.module}</span></div>
+        <div><span className="muted">test{run.test?.metric ? ` (${run.test.metric})` : ""}</span>
+          <TestScore test={run.test} metric={run.metric} detail /></div>
         <div><span className="muted">data</span>
           {ds.data_status}{ds.samples.length > 0 && ` · samples: ${ds.samples.join(", ")}`}</div>
         <div><span className="muted">actions</span>

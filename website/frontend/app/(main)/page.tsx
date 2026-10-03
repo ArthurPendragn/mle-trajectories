@@ -3,6 +3,7 @@ import { getCorpus, getJobs } from "@/lib/dal";
 import { dataLabel, fmtScore, metricLabel, shortCommit } from "@/lib/format";
 import type { DatasetInfo, RunSummary } from "@/lib/types";
 import { StaleHint } from "@/components/stale-hint";
+import { TestScore } from "@/components/test-score";
 
 export const dynamic = "force-dynamic";
 
@@ -72,7 +73,9 @@ export default async function CorpusPage() {
             <thead>
               <tr>
                 <th>Run</th><th>Agent</th><th className="num">Steps</th>
-                <th className="num">Best</th><th>Lineage</th><th>Skrub plans</th><th>Runtime</th>
+                <th className="num" title="the agent's own validation score (its optimisation signal)">Best val</th>
+                <th className="num" title="the submission's score on the held-out test labels; small: test − validation of the same step, + = better">Test</th>
+                <th>Lineage</th><th>Skrub plans</th><th>Runtime</th>
               </tr>
             </thead>
             <tbody>
@@ -85,6 +88,7 @@ export default async function CorpusPage() {
                   <td><span className={`badge agent-${r.agent}`}>{r.agent ?? "?"}</span></td>
                   <td className="num">{r.n_steps || <span className="muted">—</span>}</td>
                   <td className="num" title={r.best?.module ?? undefined}>{fmtScore(r.best?.score)}</td>
+                  <td className="num"><TestScore test={r.test} metric={r.metric} /></td>
                   <td>{r.lineage ?? <span className="muted">none</span>}</td>
                   <td><Plans run={r} /></td>
                   <td><Runtime run={r} current={corpus.stratum_commit} /></td>

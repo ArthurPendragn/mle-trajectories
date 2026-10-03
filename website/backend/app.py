@@ -21,7 +21,7 @@ from fastapi import Body, FastAPI, HTTPException, Response
 from . import actions, jobs
 from .code_analysis import run_code, warm
 from .registry import (REPO_ROOT, Dataset, Metric, Run, RuntimeStore, Source, StepInfo,
-                       current_stratum_commit, load_corpus)
+                       TestScores, current_stratum_commit, load_corpus)
 from .runtime_profile import build_profile
 from .tree import build_tree
 
@@ -69,7 +69,20 @@ def _runtime(r: RuntimeStore) -> dict:
 
 def _step(s: StepInfo) -> dict:
     return {"module": s.module, "parent": s.parent, "phase": s.phase,
-            "score": s.score, "desc": s.desc}
+            "score": s.score, "test_score": s.test_score, "desc": s.desc}
+
+
+def _test(run: Run, t: TestScores | None) -> dict | None:
+    if t is None:
+        return None
+    # the validation score of the submitted step, for the val -> test gap
+    val = next((s.score for s in run.steps if t.final_pipeline and s.module == t.final_pipeline),
+               None)
+    return {"metric": t.metric, "scored_at": t.scored_at, "note": t.note,
+            "final": None if t.final is None and t.final_pipeline is None else {
+                "score": t.final, "pipeline": t.final_pipeline, "file": t.final_file,
+                "note": t.final_note, "val_score": val},
+            "n_steps": len(t.steps)}
 
 
 def _run_summary(run: Run) -> dict:
@@ -79,7 +92,9 @@ def _run_summary(run: Run) -> dict:
         "id": run.id, "dataset": run.dataset.name, "name": run.name, "label": run.label,
         "agent": run.agent, "metric": _metric(run.metric), "lineage": run.lineage_from,
         "n_steps": len(run.steps),
-        "best": None if best is None else {"module": best.module, "score": best.score},
+        "best": None if best is None else {"module": best.module, "score": best.score,
+                                           "test_score": best.test_score},
+        "test": _test(run, run.test),
         "default_source": None if src is None else _source(run, src),
         "n_sources": len([s for s in run.sources if not s.hidden]),
         "runtime": [_runtime(r) for r in run.runtime],

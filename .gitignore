@@ -29,3 +29,6 @@ __pycache__/
 # - sizes, knobs, seed, row counts before and after - is the only thing left
 # that says what the numbers were measured on
 !**/sample_manifest.json
+
+# beaver_enroll: the BEAVER download (MySQL dump) that get_data.sh builds input/ from
+beaver_enroll/raw/

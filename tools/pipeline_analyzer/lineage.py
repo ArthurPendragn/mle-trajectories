@@ -105,8 +105,11 @@ def build_lineage(pipelines: list[Pipeline], results_path: Path | None = None) -
     nodes: dict[str, LineageNode] = {}
     for p in pipelines:
         r = results.get(p.name, {})
+        # nano-mle plans carry no PARENT/DESCRIPTION; results.json has both
+        if p.description is None and r.get("description"):
+            p.description = r["description"]
         nodes[p.name] = LineageNode(
-            name=p.name, pipeline=p, parent=p.parent,
+            name=p.name, pipeline=p, parent=p.parent or r.get("parent"),
             score=r.get("score"), metric=r.get("metric"),
             duration_s=r.get("duration_s"),
             grid=(r.get("extra") or {}).get("grid"),

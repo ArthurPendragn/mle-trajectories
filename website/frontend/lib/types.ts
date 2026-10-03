@@ -28,6 +28,21 @@ export type RuntimeStore = {
   commits: string[];
 };
 
+/** test_scores.toml: scores on the held-out test labels, entered outside the agent's loop. */
+export type TestScores = {
+  metric: string | null;          // null: same metric as the run's validation score
+  scored_at: string | null;
+  note: string | null;
+  final: {                        // the submission the agent handed in
+    score: number | null;
+    pipeline: string | null;      // the step that produced it
+    file: string | null;
+    note: string | null;
+    val_score: number | null;     // that step's own validation score
+  } | null;
+  n_steps: number;                // steps with a test score of their own
+};
+
 export type RunSummary = {
   id: string;
   dataset: string;
@@ -37,7 +52,8 @@ export type RunSummary = {
   metric: Metric;
   lineage: "trajectory" | "results.json" | null;
   n_steps: number;
-  best: { module: string | null; score: number } | null;
+  best: { module: string | null; score: number; test_score: number | null } | null;
+  test: TestScores | null;
   default_source: Source | null;
   n_sources: number;
   runtime: RuntimeStore[];
@@ -67,6 +83,7 @@ export type Step = {
   parent: string | null;
   phase: string | null;
   score: number | null;
+  test_score: number | null;
   desc: string | null;
 };
 

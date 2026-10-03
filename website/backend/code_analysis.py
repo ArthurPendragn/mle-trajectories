@@ -82,9 +82,9 @@ def _rel(p: Path) -> str:
 
 
 def run_code(run: Run) -> dict:
-    if run.agent == "mle-claude":
+    if run.agent in ("mle-claude", "nano-mle"):
         return {"covered_by": "operator analysis",
-                "reason": "mle-claude pipelines are skrub plans over shared modules; the operator "
+                "reason": f"{run.agent} pipelines are skrub plans; the operator "
                           "explorer and operator statistics describe them exactly."}
     if run.originals is None or not run.originals.files:
         return {"covered_by": None, "reason": "no original scripts in pipelines/"}

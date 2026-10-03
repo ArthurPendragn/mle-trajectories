@@ -15,6 +15,7 @@ import importlib
 import importlib.util
 import sys
 import traceback
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -83,11 +84,9 @@ def load_pipeline(module_name: str, pipe_dir: Path, *, unroll_choices: bool = Fa
     """
     path = pipe_dir / f"{module_name}.py"
     try:
-        with skrub.config_context(eager_data_ops=False):
+        with skrub.config_context(eager_data_ops=False), _as_data_op_passthrough():
             mod = _fresh_import(module_name, path)
-            pred = getattr(mod, "pred", None)
-            if pred is None:
-                raise AttributeError(f"{module_name} defines no module-level `pred`")
+            pred = _plan_of(mod, module_name)
             config = OptConfig(unroll_choices=unroll_choices)
             root = logical_optimize(pred, config)
             dag = build_dag(root)
@@ -107,6 +106,41 @@ def load_pipeline(module_name: str, pipe_dir: Path, *, unroll_choices: bool = Fa
             doc=None, dag=None,
             error=f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}",
         )
+
+
+@contextmanager
+def _as_data_op_passthrough():
+    """Make ``skrub.as_data_op`` return a DataOp argument unchanged.
+
+    skrub wraps it in a ``Value`` node that evaluates to the inner op's result --
+    an identity -- but stratum's ``logical_optimize`` does not look inside such a
+    node and fails with "Encountered op MethodCallOp(...) which should not exist
+    in the DAG" (nano-mle's ``features = skrub.as_data_op(activation_counts)``).
+    Dropping the wrapper gives the same computation without the redundant node.
+    """
+    original = skrub.as_data_op
+
+    def as_data_op(value):
+        return value if isinstance(value, skrub.DataOp) else original(value)
+
+    skrub.as_data_op = as_data_op
+    try:
+        yield
+    finally:
+        skrub.as_data_op = original
+
+
+def _plan_of(mod, module_name: str):
+    """The plan's prediction DataOp: a module-level ``pred`` (mle-claude,
+    skrubify), else what ``build()`` returns -- nano-mle plans define
+    ``build() -> {"pred": ..., "scoring": ..., ...}`` and nothing at module level."""
+    pred = getattr(mod, "pred", None)
+    if pred is None and callable(getattr(mod, "build", None)):
+        built = mod.build()
+        pred = built.get("pred") if isinstance(built, dict) else built
+    if pred is None:
+        raise AttributeError(f"{module_name} defines no module-level `pred` and no `build()`")
+    return pred
 
 
 def _physical_dag(pred, config: OptConfig):

@@ -129,6 +129,34 @@ default = true
 note = "..."
 ```
 
+`<dataset>/<run>/test_scores.toml` (optional): the score on the secret test set
+
+The agents only ever see their own validation score; this file adds the
+held-out one, scored outside the agent's loop. It holds **scores only**: the
+true test labels never enter the repo (keep them outside the repo tree
+entirely, e.g. `~/private_labels/<dataset>/`, so no agent run from this
+checkout can read them, and no `input/` or sample folder carries them).
+
+```toml
+scored_at = 2026-10-03
+note = "Kaggle private leaderboard"
+# metric = "rmse"              # only if not the run's metric; then no val/test gap is shown
+
+[final]                        # the submission the agent handed in
+score = 0.9573
+pipeline = "final_solution"    # the step that produced it: a module name from the Steps table
+file = "pipelines/ensemble/final/submission.csv"   # the predictions scored
+
+[steps]                        # optional: where the run kept predictions per step
+pipeline_12 = 0.9561
+```
+
+The corpus table gets a **Test** column next to **Best val**, the run page a
+**test** fact and, when steps are scored, a **Test** column in the Steps table;
+the small number beside a test score is test − validation of the same step
+(+ = test better). The submitted step is badged in the Steps table. Step names
+not in the lineage are reported as warnings.
+
 ### Which source and runtime store a view uses
 
 The operator explorer and operator statistics depend on the **skrub source**,
@@ -281,7 +309,7 @@ Done: registry and manifests, API, login, corpus page, run page — source and
 runtime-store pickers, search tree, operator explorer, operator statistics
 (logical, physical), runtime profile, sources and coverage, runtime stores
 (with a quiet hint when measured under an older stratum build), trajectory
-metadata, steps with Δ vs parent, code analysis, actions (build sample, runtime sweep).
+metadata, steps with Δ vs parent, held-out test scores, code analysis, actions (build sample, runtime sweep).
 
 Left out on purpose: the static report's per-step diff sections (the
 explorer's "diff vs parent" colouring covers one step on demand).
