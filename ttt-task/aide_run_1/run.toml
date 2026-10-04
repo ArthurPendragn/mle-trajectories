@@ -1,0 +1,3 @@
+agent = "aide"
+label = "AIDE run 1"
+note = "gemini/gemini-3.8-flash (high reasoning), 17 steps (config.yaml). Restart with the remaining 7.2 h of an 8 h budget: a first attempt crashed after 4 steps on an AIDE interpreter-cleanup bug (fixed). Stopped early at 17:29 by the kernel OOM killer: step 18's code grew to ~258 GB RSS on a 251 GB machine and was killed with the whole session, so steps 1-17 are complete but no report.md was written. 3 of 5 drafts failed on an uninstalled polars import."

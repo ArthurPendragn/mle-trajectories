@@ -1,0 +1,8 @@
+scored_at = 2026-10-04
+note = "official scorer (scoring/score.py) against the held-out target labels (target_with_labels.tsv), 50,000 domains"
+
+[final]                        # the submission written at the end of the run
+score = 0.8422
+pipeline = "0016_d53c29fdd0954494b9397558f90e2cb4"
+file = "submission.tsv"
+note = "written by step 16 (best, CV Recall@10 0.8883 on a 10k train-domain holdout); step 17 was OOM-killed before writing one"
