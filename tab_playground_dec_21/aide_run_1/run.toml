@@ -1,0 +1,3 @@
+agent = "aide"
+label = "AIDE run 1"
+note = "gemini/gemini-3.8-flash (high reasoning), 9 steps / 4 h budget (config.yaml). Task description asks for 5-fold CV and names the metric (dataset copy: 3-fold)."
