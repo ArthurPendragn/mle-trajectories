@@ -1,0 +1,8 @@
+scored_at = 2026-10-04
+note = "Kaggle private leaderboard (after deadline); public 0.95584"
+
+[final]                        # the submission written at the end of the run
+score = 0.95566
+pipeline = "pipeline_24"
+file = "submission.csv"
+note = "final_pipeline.py: pipeline_24 refit on all of train.csv (hidden=512, n_layers=3)"
