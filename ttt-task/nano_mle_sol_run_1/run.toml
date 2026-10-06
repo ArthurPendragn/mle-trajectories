@@ -1,0 +1,3 @@
+agent = "nano-mle"
+label = "nano-mle (GPT-6.1-sol, medium reasoning, 16h, draft-greedy, full memory, 16 cores)"
+note = "nano-mle draft-greedy search (3 drafts), model openai/gpt-6.1-sol (reasoning medium), default prompt set at nano-mle 5e6fe18, 16h budget, 16 cores + 1 A100. 11 scored expansions (15 candidates incl. grid variants), 2 failed; stopped itself with 13 min left. Population check locked tracker_count >= 2 (adversarial AUC 0.501, 22 rules compared). Pool sized from a timed learned-model curve: 1.206M domains, 3 fixed validation folds. Neighbour features use labels of domains outside the pool. Best CV reached at 9.2h; later expansions tied within fold noise. Plans read task sources by absolute path."

@@ -1,0 +1,8 @@
+scored_at = 2026-10-06
+note = "official scorer (scoring/score.py) against the held-out target labels (target_with_labels.tsv), 50,000 domains"
+
+[final]                        # the submission written at the end of the run
+score = 0.8867
+pipeline = "pipeline_07"
+file = "submission.tsv"
+note = "candidate expansion_00a937188bb8_variant_2 (CV Recall@10 0.8839, 3 fixed validation folds on 1.206M domains), refit by the harness's submission step"
