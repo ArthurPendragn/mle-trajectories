@@ -1,0 +1,3 @@
+agent = "nano-mle"
+label = "nano-mle (Gemini 3.8 Flash, high reasoning, 9h, draft-greedy, full memory, 16 cores)"
+note = "nano-mle draft-greedy search (3 drafts), model gemini/gemini-3.8-flash (reasoning high), default prompt set at nano-mle a2e6cdf, 9h budget, 16 cores + 1 A100. 8 scored expansions (36 candidates incl. grid variants), 1 failed; stopped on the time budget. Population check locked 2 <= tracker_count <= 20 (adversarial AUC 0.499; >= 2 scored 0.4965). Locked custom:recall_at_10 on 50000 rows, 5 folds: the pool was set to the target size, against the prompt's pool rule, after a non-monotone learning curve. Plans read task sources by absolute path."
