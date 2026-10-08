@@ -1,0 +1,211 @@
+# NYC housing: predicting immediately hazardous violations
+
+New York City's Department of Housing Preservation and Development (HPD) inspects
+residential buildings and issues housing-maintenance violations in four classes:
+A (non-hazardous), B (hazardous), C (immediately hazardous) and I (information orders).
+Your job is to rank buildings by their risk of a Class C violation, so that
+inspections can be prioritized.
+
+## Task
+
+For every lot in the test set, predict how likely it is to receive at least one
+Class C violation during the 12 months after the cutoff.
+
+| | |
+|---|---|
+| Cutoff | 2023-01-01 |
+| Prediction window | 2023-01-01 (inclusive) to 2024-01-01 (exclusive) |
+| Data | the lake below, as of 2023-01-01 |
+| Entity | tax lot, identified by its 10-digit BBL |
+| Test set | 171,587 lots, listed in `test_entities.parquet` |
+| Metric | average precision (higher is better) |
+
+This file, `test_entities.parquet` and `sample_submission.parquet` are in `gs://mle-nyc-lake/tasks/housing_violation_risk/v1`.
+
+## Label definition
+
+For a cutoff T, lot `b` is positive if and only if table `hpd_violations` has at least one
+row with
+
+- `class` = `'C'`,
+- `inspectiondate` in [T, T + 12 months), and
+- BBL equal to `b`, where the row's BBL is its `bbl` field when that is a 10-digit value,
+  otherwise the concatenation of `boroid` (1 digit), `block` (5 digits, zero-padded)
+  and `lot` (4 digits, zero-padded).
+
+The labels for T = 2023-01-01 are hidden. They are not in the lake, because the lake
+stops at 2023-01-01. You can compute labels for earlier cutoffs from the lake to train and
+validate. For example, T = 2022-01-01 has its whole window (2022-01-01 to
+2023-01-01) inside the lake.
+
+## Entities
+
+The test set is every lot in PLUTO release 22v3 (the latest PLUTO release
+before the cutoff) with `unitsres` >= 3, i.e. multiple dwellings. For an
+earlier cutoff, the matching set comes from the latest PLUTO release before that cutoff.
+The lake contains these releases:
+
+- `19v2` (published 2019-11-22)
+- `20v7` (published 2020-11-24)
+- `21v4` (published 2021-12-16)
+- `22v3` (published 2022-11-21)
+
+## Data
+
+The lake is at `gs://mle-nyc-lake/tasks/housing_violation_risk/v1/lake`:
+
+```
+gs://mle-nyc-lake/tasks/housing_violation_risk/v1/lake/
+  DATA_DICTIONARY.md   tables, columns, keys and source documentation
+  full/                all tables
+```
+
+Each table is a directory of Parquet files, hive-partitioned by year (`year=YYYY/`) where
+large. Column types are the ones the source portal declares, so some dates are stored as
+text. A few sources keep their original file format (trip Parquet files, a shapefile).
+The lake holds many NYC datasets, and not all of them are
+useful for this task. Tables are keyed in different ways (BBL, BIN, street addresses,
+coordinates, taxi zones), and keys are not cleaned. Every table describes what was
+known on 2023-01-01.
+
+## Accessing the data
+
+There is no local data for this task (no `input/` folder): everything, including the
+test entities and the sample submission, lives in the GCS bucket and must be read from
+there:
+
+- `gs://mle-nyc-lake/tasks/housing_violation_risk/v1/test_entities.parquet`
+- `gs://mle-nyc-lake/tasks/housing_violation_risk/v1/sample_submission.parquet`
+- `gs://mle-nyc-lake/tasks/housing_violation_risk/v1/lake/` (all training data)
+
+Read it directly with pandas (via `gcsfs`, installed in `.venv`) using the service-account
+key:
+
+```python
+import pandas as pd
+
+TOKEN = "/home/estrauss-ldap/datasets/housing_violation_risk/nyc-lake-agent-key.json"
+
+df_test = pd.read_parquet(
+    "gs://mle-nyc-lake/tasks/housing_violation_risk/v1/test_entities.parquet",
+    storage_options={"token": TOKEN},
+)
+```
+
+The same `storage_options` work for any path under the lake, e.g.
+`gs://mle-nyc-lake/tasks/housing_violation_risk/v1/lake/full/<table>/`.
+
+## Submission
+
+Write your submission as CSV to `submission/submission.csv`, one row per test lot:
+
+| column | type | meaning |
+|---|---|---|
+| `bbl` | string, 10 digits | lot id from `test_entities.parquet` |
+| `score` | float | higher = more likely positive; need not be a probability |
+
+`sample_submission.parquet` has the right shape (read it from GCS; write yours as CSV). Submissions with duplicate lots, missing
+or non-numeric scores, or malformed BBLs are invalid. Test lots missing from a valid
+submission are ranked below every submitted lot.
+
+## Evaluation
+
+The score is average precision over all test lots (as in scikit-learn's
+`average_precision_score`). Also reported: ROC AUC; precision and recall when
+inspecting the top 1%, 5% and 10% of lots; and a bootstrap 95% interval for average
+precision.
+
+## Rules
+
+- Use only the data in the lake: no internet access, and no external datasets or models
+  trained on NYC data.
+
+## Lake tables
+
+The exact table names under `lake/full/` and `lake/small/`, with the columns that
+can act as join keys (most lot-specific first). Column-level detail for every
+table is in `input/DATA_DICTIONARY.md` (also at `lake/DATA_DICTIONARY.md` in GCS).
+
+Every table describes what was known on **2023-01-01**: rows that did not exist yet are absent, and values that change over time (statuses, dispositions, closing dates, ...) show their state on that day. Source descriptions below are the publishers' own and describe the datasets as they are published today.
+
+Two tiers with identical schemas:
+
+- `full/<table>/`: everything
+- `small/<table>/`: the Bronx, and events from 2021-01-01 on (reference and list tables keep all their Bronx rows)
+
+Tables are Parquet. Large tables are hive-partitioned by the year of their main event date (`year=YYYY/`); the partition column is not stored in the files. Column types follow the source portal's declared types: timestamps without a time zone are local New York time, timestamps with one (portal fixed-timestamp columns) are UTC, and columns the portal declares as text stay text (some dates, some numeric codes). Keys (BBL, BIN, addresses, coordinates, zones) are not cleaned.
+
+| table | rows (full) | cols | key columns |
+|---|---|---|---|
+| `acris_legals` | 21,260,086 | 14 | `borough`, `block`, `lot`, `street_number`, `street_name` |
+| `acris_master` | 16,050,148 | 14 | - |
+| `acris_parties` | 43,544,527 | 11 | `address_1`, `address_2`, `zip` |
+| `air_quality` | 17,853 | 12 | - |
+| `baby_names` | 29,685 | 6 | - |
+| `building_footprints` | 1,079,087 | 15 | `bin` |
+| `central_park_squirrels` | 3,023 | 31 | - |
+| `citywide_payroll` | 5,109,775 | 17 | - |
+| `dca_issued_licenses` | 50,199 | 31 | `bbl`, `bin`, `latitude`, `longitude`, `address_type`, `address_building`, `address_street_name`, `address_street_name_2` |
+| `dob_complaints` | 2,662,504 | 15 | `bin`, `house_number`, `house_street`, `zip_code`, `community_board` |
+| `dob_ecb_violations` | 1,636,473 | 46 | `bin`, `boro`, `block`, `lot` |
+| `dob_job_filings` | 2,693,575 | 95 | `bbl`, `borough`, `block`, `lot`, `house__`, `street_name`, `street_frontage`, `zip` |
+| `dob_now_job_filings` | 385,616 | 95 | `bbl`, `bin`, `borough`, `block`, `lot`, `latitude`, `longitude`, `house_no` |
+| `dob_now_permits` | 390,451 | 46 | `bbl`, `bin`, `borough`, `block`, `lot`, `latitude`, `longitude`, `house_no` |
+| `dob_permit_issuance` | 3,925,884 | 60 | `bbl`, `borough`, `block`, `lot`, `house__`, `street_name`, `zip_code`, `community_board` |
+| `dob_safety_violations` | 569,933 | 24 | `bbl`, `bin`, `borough`, `block`, `lot`, `latitude`, `longitude`, `house_number` |
+| `dob_stalled_construction` | 1,447,977 | 8 | `bin`, `house_number`, `street_name`, `community_board` |
+| `dob_violations` | 2,264,572 | 18 | `bin`, `boro`, `block`, `lot`, `house_number`, `street` |
+| `dof_annualized_sales` | 606,260 | 29 | `bbl`, `bin`, `borough`, `block`, `lot`, `latitude`, `longitude`, `address` |
+| `dof_tax_lien_sales` | 163,123 | 13 | `borough`, `block`, `lot`, `house_number`, `street_name`, `zip_code`, `community_board` |
+| `dog_licenses` | 598,663 | 8 | `zipcode` |
+| `dohmh_childcare_inspections` | 22,226 | 34 | `bin`, `borough`, `street`, `zipcode` |
+| `dohmh_restaurant_inspections` | 16,049 | 27 | `bbl`, `bin`, `boro`, `latitude`, `longitude`, `street`, `zipcode`, `community_board` |
+| `dohmh_rodent_inspections` | 2,276,259 | 24 | `bbl`, `bin`, `borough`, `block`, `lot`, `x_coord`, `y_coord`, `latitude` |
+| `dsny_monthly_tonnage` | 22,641 | 12 | `borough`, `communitydistrict` |
+| `evictions` | 71,753 | 20 | `bbl`, `bin`, `borough`, `latitude`, `longitude`, `community_board`, `nta` |
+| `farmers_markets` | 1,731 | 13 | `borough`, `latitude`, `longitude`, `streetaddress`, `community_district` |
+| `fdny_fire_incidents` | 9,604,719 | 29 | `zipcode`, `communitydistrict`, `communityschooldistrict` |
+| `film_permits` | 62 | 14 | `borough`, `zipcode_s`, `communityboard_s` |
+| `flood_vulnerability_index` | 2,209 | 9 | - |
+| `hpd_aep_buildings` | 3,387 | 19 | `bbl`, `bin`, `boro`, `latitude`, `longitude`, `street_address`, `postcode`, `community_board` |
+| `hpd_affordable_housing` | 6,449 | 41 | `bbl`, `bin`, `borough`, `latitude`, `longitude`, `house_number`, `street_name`, `postcode` |
+| `hpd_bedbug_reports` | 311,084 | 21 | `bbl`, `bin`, `borough`, `latitude`, `longitude`, `house_number`, `street_name`, `postcode` |
+| `hpd_buildings` | 380,119 | 23 | `bin`, `boroid`, `boro`, `block`, `lot`, `buildingid`, `registrationid`, `housenumber` |
+| `hpd_complaints` | 13,210,552 | 33 | `bbl`, `bin`, `borough`, `block`, `lot`, `latitude`, `longitude`, `house_number` |
+| `hpd_conh_buildings` | 1,149 | 22 | `bbl`, `bin`, `borocode`, `borough`, `block`, `lot`, `latitude`, `longitude` |
+| `hpd_hwo_charges` | 88,937 | 32 | `bbl`, `bin`, `boroid`, `boro`, `block`, `lot`, `buildingid`, `latitude` |
+| `hpd_litigations` | 200,869 | 24 | `bbl`, `bin`, `boroid`, `block`, `lot`, `buildingid`, `latitude`, `longitude` |
+| `hpd_omo_charges` | 419,086 | 32 | `bbl`, `bin`, `boro`, `block`, `lot`, `buildingid`, `latitude`, `longitude` |
+| `hpd_registration_contacts` | 810,494 | 15 | `registrationid` |
+| `hpd_registrations` | 203,887 | 16 | `bin`, `boroid`, `boro`, `block`, `lot`, `registrationid`, `buildingid`, `housenumber` |
+| `hpd_underlying_conditions` | 505 | 16 | `bbl`, `bin`, `borough`, `latitude`, `longitude`, `street_name`, `postcode`, `community_board` |
+| `hpd_vacate_orders` | 6,231 | 20 | `bbl`, `bin`, `latitude`, `longitude`, `house_number`, `street_name`, `community_board`, `nta` |
+| `hpd_violations` | 7,808,199 | 41 | `bbl`, `bin`, `boroid`, `boro`, `block`, `lot`, `buildingid`, `registrationid` |
+| `landmark_buildings` | 38,105 | 37 | `bbl`, `bin`, `borough`, `block`, `lot` |
+| `landmarks_complaints` | 4,685 | 18 | `bin`, `borough`, `block`, `lot`, `latitude`, `longitude`, `address`, `street_name` |
+| `ll44_buildings` | 3,231 | 24 | `bbl`, `bin`, `boroid`, `block`, `lot`, `buildingid`, `latitude`, `longitude` |
+| `ll84_energy_cy2019` | 29,084 | 254 | `borough`, `latitude`, `longitude`, `address_1`, `address_2`, `postcode`, `community_board`, `nta` |
+| `ll84_energy_cy2020` | 28,067 | 250 | `borough`, `longitude`, `latitude`, `address_1`, `postcode`, `community_board`, `nta` |
+| `ll84_energy_cy2021` | 29,842 | 249 | `borough`, `latitude`, `longitude`, `address_1`, `community_board`, `nta` |
+| `motor_vehicle_collisions` | 1,959,294 | 29 | `borough`, `latitude`, `longitude`, `zip_code` |
+| `nycha_developments` | 303 | 52 | `borough`, `community_distirct` |
+| `nypd_complaints` | 8,359,721 | 35 | `x_coord_cd`, `y_coord_cd`, `latitude`, `longitude` |
+| `nypd_shootings` | 27,312 | 21 | `boro`, `x_coord_cd`, `y_coord_cd`, `latitude`, `longitude` |
+| `open_restaurant_applications` | 13,842 | 35 | `bbl`, `bin`, `borough`, `latitude`, `longitude`, `street`, `zip`, `community_board` |
+| `parking_violations_fy2022` | 15,435,075 | 43 | `street_code1`, `street_code2`, `street_code3`, `house_number`, `street_name` |
+| `parking_violations_fy2023` | 9,155,608 | 43 | `street_code1`, `street_code2`, `street_code3`, `house_number`, `street_name` |
+| `parks_properties` | 2,042 | 33 | `borough`, `address`, `zipcode`, `communityboard`, `councildistrict` |
+| `pluto` | 3,437,092 | 103 | `bbl`, `borough`, `borocode`, `block`, `lot`, `latitude`, `longitude`, `zipcode` |
+| `school_bus_delays` | 989,286 | 21 | `boro` |
+| `service_requests_311_2010_2019` | 22,613,917 | 44 | `bbl`, `borough`, `x_coordinate_state_plane`, `y_coordinate_state_plane`, `latitude`, `longitude`, `street_name`, `address_type` |
+| `service_requests_311_2020_present` | 9,332,866 | 44 | `bbl`, `borough`, `x_coordinate_state_plane`, `y_coordinate_state_plane`, `latitude`, `longitude`, `street_name`, `address_type` |
+| `service_requests_311_satisfaction` | 37,939 | 11 | `borough` |
+| `sidewalk_cafe_licenses` | 324 | 47 | `street`, `zip`, `community_district` |
+| `speculation_watch_list` | 561 | 24 | `bbl`, `bin`, `borough`, `boro`, `block`, `lot`, `latitude`, `longitude` |
+| `street_trees_1995` | 516,989 | 30 | `bbl`, `bin`, `borough`, `longitude`, `latitude`, `address`, `house_number`, `street` |
+| `street_trees_2005` | 592,372 | 54 | `bbl`, `bin`, `borocode`, `latitude`, `longitude`, `address`, `zipcode`, `zip_city` |
+| `street_trees_2015` | 683,788 | 45 | `bbl`, `bin`, `borocode`, `latitude`, `longitude`, `address`, `zipcode`, `zip_city` |
+| `taxi_zones` | – | 0 | - |
+| `tlc_fhvhv_trips` | 764,946,523 | 24 | - |
+| `traffic_volume_counts` | 1,603,357 | 14 | `boro`, `street` |
+| `wifi_hotspots` | 1,822 | 29 | `bbl`, `bin`, `borough`, `borocode`, `latitude`, `longitude`, `zip`, `ntacode` |

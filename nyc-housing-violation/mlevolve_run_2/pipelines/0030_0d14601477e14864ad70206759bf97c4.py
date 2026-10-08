@@ -1,0 +1,1116 @@
+import copy
+import gc
+import glob
+import json
+import os
+import sys
+import gcsfs
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import pyarrow.parquet as pq
+from scipy.stats import rankdata
+from sklearn.metrics import average_precision_score
+from sklearn.preprocessing import StandardScaler
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+# ---------------------------------------------------------------------------
+# Setup directories & Storage Authentication
+# ---------------------------------------------------------------------------
+os.makedirs("./working", exist_ok=True)
+os.makedirs("./submission", exist_ok=True)
+
+GCS_BASE = "gs://mle-nyc-lake/tasks/housing_violation_risk/v1"
+LAKE_FULL = f"{GCS_BASE}/lake/full"
+
+DEFAULT_TOKEN = (
+    "/home/estrauss-ldap/datasets/housing_violation_risk/nyc-lake-agent-key.json"
+)
+TOKEN = DEFAULT_TOKEN if os.path.exists(DEFAULT_TOKEN) else None
+if TOKEN is None:
+    found_tokens = glob.glob("/home/**/nyc-lake-agent-key.json", recursive=True)
+    if found_tokens:
+        TOKEN = found_tokens[0]
+    elif "GOOGLE_APPLICATION_CREDENTIALS" in os.environ and os.path.exists(
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+    ):
+        TOKEN = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+
+storage_options = {"token": TOKEN} if TOKEN else {}
+fs = gcsfs.GCSFileSystem(token=TOKEN) if TOKEN else gcsfs.GCSFileSystem()
+
+
+def standardize_bbl(
+    df, bbl_col="bbl", boro_col="boroid", block_col="block", lot_col="lot"
+):
+    """Standardizes BBL to a clean 10-character string:
+
+    1 digit boro + 5 digit block + 4 digit lot. Follows official rule: use bbl
+    if 10-digit, else construct from boro, block, lot.
+    """
+    if bbl_col in df.columns:
+        s = df[bbl_col]
+        if pd.api.types.is_float_dtype(s):
+            bbl_str = s.fillna(0).astype("int64").astype(str)
+        else:
+            bbl_str = s.astype(str).str.split(".").str[0].str.strip()
+        valid = (bbl_str.str.len() == 10) & (
+            bbl_str.str[0].isin(["1", "2", "3", "4", "5"])
+        )
+    else:
+        valid = pd.Series(False, index=df.index)
+        bbl_str = pd.Series("", index=df.index)
+
+    alt_boro_cols = [
+        c for c in [boro_col, "borough", "borocode", "boro"] if c in df.columns
+    ]
+    alt_block_cols = [c for c in [block_col, "block"] if c in df.columns]
+    alt_lot_cols = [c for c in [lot_col, "lot"] if c in df.columns]
+
+    if (~valid).any() and alt_boro_cols and alt_block_cols and alt_lot_cols:
+        b_col, blk_col, lt_col = (
+            alt_boro_cols[0],
+            alt_block_cols[0],
+            alt_lot_cols[0],
+        )
+        idx = ~valid
+        boro_val = df.loc[idx, b_col]
+        boro_map = {
+            "MANHATTAN": "1",
+            "BRONX": "2",
+            "BROOKLYN": "3",
+            "QUEENS": "4",
+            "STATEN ISLAND": "5",
+            "MN": "1",
+            "BX": "2",
+            "BK": "3",
+            "QN": "4",
+            "SI": "5",
+        }
+        if pd.api.types.is_string_dtype(boro_val) or pd.api.types.is_object_dtype(
+            boro_val
+        ):
+            boro_digit = boro_val.astype(str).str.upper().map(boro_map)
+            boro_digit = boro_digit.fillna(
+                pd.to_numeric(boro_val, errors="coerce")
+                .fillna(0)
+                .astype("int64")
+                .astype(str)
+            )
+        else:
+            boro_digit = (
+                pd.to_numeric(boro_val, errors="coerce")
+                .fillna(0)
+                .astype("int64")
+                .astype(str)
+            )
+
+        block_val = (
+            pd.to_numeric(df.loc[idx, blk_col], errors="coerce")
+            .fillna(0)
+            .astype("int64")
+            .apply(lambda x: f"{x:05d}")
+        )
+        lot_val = (
+            pd.to_numeric(df.loc[idx, lt_col], errors="coerce")
+            .fillna(0)
+            .astype("int64")
+            .apply(lambda x: f"{x:04d}")
+        )
+
+        constructed = boro_digit + block_val + lot_val
+        bbl_str = bbl_str.copy()
+        bbl_str.loc[idx] = constructed
+
+    return bbl_str
+
+
+def get_table_schema(table_name, gcs_path=None):
+    """Dynamically resolves column names for a lake table using PyArrow schema or DATA_DICTIONARY.md."""
+    if gcs_path:
+        clean_path = gcs_path.replace("gs://", "")
+        try:
+            ds = pq.ParquetDataset(clean_path, filesystem=fs)
+            if ds.schema and ds.schema.names:
+                return list(ds.schema.names)
+        except Exception:
+            pass
+
+    for dict_path in ["./input/DATA_DICTIONARY.md", "DATA_DICTIONARY.md"]:
+        if os.path.exists(dict_path):
+            try:
+                with open(dict_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                import re
+                pattern = re.compile(
+                    rf"#+\s*[`*_]*{re.escape(table_name)}[`*_]*\b(.*?)(?=\n#+ |\Z)",
+                    re.DOTALL | re.IGNORECASE,
+                )
+                m = pattern.search(content)
+                if m:
+                    sec = m.group(1)
+                    cols = re.findall(r"-\s*`([^`]+)`", sec)
+                    if cols:
+                        return cols
+            except Exception:
+                pass
+    return []
+
+
+def find_matching_col(candidates, available_cols):
+    """Finds the first candidate column present in available_cols (case-insensitive)."""
+    avail_lower = {c.lower(): c for c in available_cols}
+    for cand in candidates:
+        if cand.lower() in avail_lower:
+            return avail_lower[cand.lower()]
+    return None
+
+
+def safe_read_parquet(gcs_path, preferred_cols):
+    """Safely reads parquet dataset from GCS by projecting only available columns."""
+    clean_path = gcs_path.replace("gs://", "")
+    try:
+        dataset = pq.ParquetDataset(clean_path, filesystem=fs)
+        avail_map = {c.lower(): c for c in dataset.schema.names}
+        cols_to_load = [avail_map[c.lower()] for c in preferred_cols if c.lower() in avail_map]
+        if not cols_to_load:
+            cols_to_load = None
+        df = pd.read_parquet(
+            gcs_path, columns=cols_to_load, storage_options=storage_options
+        )
+        return df
+    except Exception:
+        df = pd.read_parquet(gcs_path, storage_options=storage_options)
+        avail_map = {c.lower(): c for c in df.columns}
+        cols = [avail_map[c.lower()] for c in preferred_cols if c.lower() in avail_map]
+        return df[cols] if cols else df
+
+
+# ---------------------------------------------------------------------------
+# 1. Load Entities & PLUTO Building Morphology
+# ---------------------------------------------------------------------------
+test_entities_df = pd.read_parquet(
+    f"{GCS_BASE}/test_entities.parquet", storage_options=storage_options
+)
+test_entities_df["bbl"] = standardize_bbl(test_entities_df)
+test_bbls = test_entities_df["bbl"].unique()
+
+pluto_cols = [
+    "bbl",
+    "borocode",
+    "block",
+    "lot",
+    "unitsres",
+    "unitstotal",
+    "yearbuilt",
+    "bldgclass",
+    "numfloors",
+    "bldgarea",
+    "resarea",
+    "lotarea",
+    "cd",
+    "version",
+]
+df_pluto = safe_read_parquet(f"{LAKE_FULL}/pluto", pluto_cols)
+df_pluto["bbl"] = standardize_bbl(df_pluto)
+df_pluto = df_pluto[df_pluto["bbl"].str.len() == 10].copy()
+
+if "version" in df_pluto.columns:
+    df_pluto = df_pluto.sort_values("version").drop_duplicates("bbl", keep="last")
+else:
+    df_pluto = df_pluto.drop_duplicates("bbl", keep="last")
+
+df_pluto["unitsres"] = (
+    pd.to_numeric(df_pluto["unitsres"], errors="coerce").fillna(1.0).clip(lower=1.0)
+)
+df_pluto["unitstotal"] = (
+    pd.to_numeric(df_pluto["unitstotal"], errors="coerce").fillna(1.0).clip(lower=1.0)
+)
+df_pluto["yearbuilt"] = (
+    pd.to_numeric(df_pluto["yearbuilt"], errors="coerce")
+    .fillna(1950.0)
+    .clip(lower=1800, upper=2023)
+)
+df_pluto["numfloors"] = (
+    pd.to_numeric(df_pluto["numfloors"], errors="coerce").fillna(3.0).clip(lower=1.0)
+)
+df_pluto["bldgarea"] = (
+    pd.to_numeric(df_pluto["bldgarea"], errors="coerce").fillna(0.0).clip(lower=0.0)
+)
+df_pluto["resarea"] = (
+    pd.to_numeric(df_pluto["resarea"], errors="coerce").fillna(0.0).clip(lower=0.0)
+)
+df_pluto["lotarea"] = (
+    pd.to_numeric(df_pluto["lotarea"], errors="coerce").fillna(0.0).clip(lower=0.0)
+)
+df_pluto["borocode"] = (
+    pd.to_numeric(df_pluto["borocode"], errors="coerce")
+    .fillna(df_pluto["bbl"].str[0].astype(float))
+    .fillna(1.0)
+)
+df_pluto["cd"] = pd.to_numeric(df_pluto["cd"], errors="coerce").fillna(
+    df_pluto["borocode"] * 100 + 1.0
+)
+df_pluto["bldgclass_first"] = df_pluto["bldgclass"].astype(str).str[0].fillna("C")
+
+entity_universe_df = df_pluto[df_pluto["unitsres"] >= 3].copy()
+universe_bbls = set(entity_universe_df["bbl"]).union(set(test_bbls))
+
+pluto_features = df_pluto.set_index("bbl")[
+    [
+        "borocode",
+        "unitsres",
+        "unitstotal",
+        "yearbuilt",
+        "numfloors",
+        "bldgarea",
+        "resarea",
+        "lotarea",
+        "cd",
+        "bldgclass_first",
+    ]
+].to_dict("index")
+
+del df_pluto
+gc.collect()
+
+# ---------------------------------------------------------------------------
+# 2. Load Administrative Distress & Auxiliary Datasets
+# ---------------------------------------------------------------------------
+try:
+    aep_schema = get_table_schema("hpd_aep_buildings", f"{LAKE_FULL}/hpd_aep_buildings")
+    aep_cols = [c for c in ["bbl", "boroid", "boro", "block", "lot"] if find_matching_col([c], aep_schema)]
+    df_aep = pd.read_parquet(
+        f"{LAKE_FULL}/hpd_aep_buildings",
+        columns=aep_cols if aep_cols else None,
+        storage_options=storage_options,
+    )
+    df_aep["bbl"] = standardize_bbl(df_aep)
+    aep_bbl_set = set(df_aep["bbl"].unique())
+    del df_aep
+except Exception:
+    aep_bbl_set = set()
+
+try:
+    vacate_schema = get_table_schema("hpd_vacate_orders", f"{LAKE_FULL}/hpd_vacate_orders")
+    vacate_date_col = find_matching_col(
+        ["vacate_effective_date", "effective_date", "vacate_date", "vacatedate"],
+        vacate_schema,
+    )
+    vacate_cols_to_load = []
+    for c_cand in ["bbl", "boroid", "borough", "block", "lot"]:
+        m = find_matching_col([c_cand], vacate_schema)
+        if m and m not in vacate_cols_to_load:
+            vacate_cols_to_load.append(m)
+    if vacate_date_col and vacate_date_col not in vacate_cols_to_load:
+        vacate_cols_to_load.append(vacate_date_col)
+
+    df_vacate = pd.read_parquet(
+        f"{LAKE_FULL}/hpd_vacate_orders",
+        columns=vacate_cols_to_load if vacate_cols_to_load else None,
+        storage_options=storage_options,
+    )
+    df_vacate["bbl"] = standardize_bbl(df_vacate)
+    if vacate_date_col and vacate_date_col in df_vacate.columns:
+        df_vacate["vacate_effective_date"] = pd.to_datetime(df_vacate[vacate_date_col], errors="coerce")
+    else:
+        df_vacate["vacate_effective_date"] = pd.NaT
+    df_vacate = df_vacate[df_vacate["bbl"].isin(universe_bbls)][["bbl", "vacate_effective_date"]].copy()
+except Exception:
+    df_vacate = pd.DataFrame(columns=["bbl", "vacate_effective_date"])
+
+try:
+    lit_schema = get_table_schema("hpd_litigations", f"{LAKE_FULL}/hpd_litigations")
+    lit_date_col = find_matching_col(
+        ["caseopendate", "case_open_date", "case_date", "date_opened", "opendate"],
+        lit_schema,
+    )
+    lit_cols_to_load = []
+    for c_cand in ["bbl", "boroid", "borough", "block", "lot"]:
+        m = find_matching_col([c_cand], lit_schema)
+        if m and m not in lit_cols_to_load:
+            lit_cols_to_load.append(m)
+    if lit_date_col and lit_date_col not in lit_cols_to_load:
+        lit_cols_to_load.append(lit_date_col)
+
+    df_lit = pd.read_parquet(
+        f"{LAKE_FULL}/hpd_litigations",
+        columns=lit_cols_to_load if lit_cols_to_load else None,
+        storage_options=storage_options,
+    )
+    df_lit["bbl"] = standardize_bbl(df_lit)
+    if lit_date_col and lit_date_col in df_lit.columns:
+        df_lit["caseopendate"] = pd.to_datetime(df_lit[lit_date_col], errors="coerce")
+    else:
+        df_lit["caseopendate"] = pd.NaT
+    df_lit = df_lit[df_lit["bbl"].isin(universe_bbls)][["bbl", "caseopendate"]].copy()
+except Exception:
+    df_lit = pd.DataFrame(columns=["bbl", "caseopendate"])
+
+try:
+    complaint_schema = get_table_schema("hpd_complaints", f"{LAKE_FULL}/hpd_complaints")
+    complaint_date_col = find_matching_col(
+        [
+            "receiveddate", "received_date", "date_received",
+            "status_date", "statusdate", "complaint_date",
+            "complaintdate", "date_entered", "entereddate",
+        ],
+        complaint_schema,
+    )
+    if not complaint_date_col:
+        complaint_date_col = next((c for c in complaint_schema if "date" in c.lower()), None)
+
+    complaint_cols_to_load = []
+    for c_cand in ["bbl", "boroid", "borough", "block", "lot"]:
+        m = find_matching_col([c_cand], complaint_schema)
+        if m and m not in complaint_cols_to_load:
+            complaint_cols_to_load.append(m)
+    if complaint_date_col and complaint_date_col not in complaint_cols_to_load:
+        complaint_cols_to_load.append(complaint_date_col)
+
+    df_complaints = pd.read_parquet(
+        f"{LAKE_FULL}/hpd_complaints",
+        columns=complaint_cols_to_load if complaint_cols_to_load else None,
+        storage_options=storage_options,
+    )
+    df_complaints["bbl"] = standardize_bbl(df_complaints)
+    if complaint_date_col and complaint_date_col in df_complaints.columns:
+        df_complaints["receiveddate"] = pd.to_datetime(df_complaints[complaint_date_col], errors="coerce")
+    else:
+        df_complaints["receiveddate"] = pd.NaT
+
+    df_complaints = df_complaints[
+        (df_complaints["bbl"].isin(universe_bbls))
+        & (df_complaints["receiveddate"] >= "2018-01-01")
+    ][["bbl", "receiveddate"]].copy()
+except Exception:
+    df_complaints = pd.DataFrame(columns=["bbl", "receiveddate"])
+gc.collect()
+
+# ---------------------------------------------------------------------------
+# 3. Load HPD Violations (Core Signal)
+# ---------------------------------------------------------------------------
+viol_schema = get_table_schema("hpd_violations", f"{LAKE_FULL}/hpd_violations")
+insp_date_col = find_matching_col(
+    ["inspectiondate", "inspection_date", "inspection_date_time", "novissueddate"],
+    viol_schema,
+) or "inspectiondate"
+
+status_date_col = find_matching_col(
+    ["currentstatusdate", "current_status_date", "status_date", "statusdate"],
+    viol_schema,
+)
+
+class_col = find_matching_col(["class", "violationstatus", "violation_class"], viol_schema) or "class"
+
+viol_cols_to_load = []
+for c_cand in ["bbl", "boroid", "borough", "borocode", "boro", "block", "lot"]:
+    m = find_matching_col([c_cand], viol_schema)
+    if m and m not in viol_cols_to_load:
+        viol_cols_to_load.append(m)
+
+for c in [class_col, insp_date_col, status_date_col]:
+    if c and c in viol_schema and c not in viol_cols_to_load:
+        viol_cols_to_load.append(c)
+
+df_violations = pd.read_parquet(
+    f"{LAKE_FULL}/hpd_violations",
+    columns=viol_cols_to_load if viol_cols_to_load else None,
+    storage_options=storage_options,
+)
+df_violations["bbl"] = standardize_bbl(df_violations)
+
+if class_col in df_violations.columns:
+    df_violations["class"] = df_violations[class_col].astype(str).str.upper().str.strip()
+else:
+    df_violations["class"] = ""
+
+if insp_date_col in df_violations.columns:
+    df_violations["inspectiondate"] = pd.to_datetime(df_violations[insp_date_col], errors="coerce")
+else:
+    df_violations["inspectiondate"] = pd.NaT
+
+if status_date_col and status_date_col in df_violations.columns:
+    df_violations["currentstatusdate"] = pd.to_datetime(df_violations[status_date_col], errors="coerce")
+else:
+    df_violations["currentstatusdate"] = pd.NaT
+
+df_violations = df_violations[
+    (df_violations["bbl"].isin(universe_bbls))
+    & (df_violations["inspectiondate"] >= "2017-01-01")
+][["bbl", "class", "inspectiondate", "currentstatusdate"]].copy()
+gc.collect()
+
+
+# ---------------------------------------------------------------------------
+# 4. Point-In-Time Feature Extraction Engine
+# ---------------------------------------------------------------------------
+def compute_cohort_dataset(cutoff_str, target_bbl_list, is_test=False):
+    cutoff = pd.Timestamp(cutoff_str)
+    cutoff_1y_prior = cutoff - pd.DateOffset(days=365)
+    cutoff_2y_prior = cutoff - pd.DateOffset(days=730)
+    cutoff_3y_prior = cutoff - pd.DateOffset(days=1095)
+    cutoff_90d_prior = cutoff - pd.DateOffset(days=90)
+
+    df_cohort = (
+        pd.DataFrame({"bbl": target_bbl_list})
+        .drop_duplicates("bbl")
+        .reset_index(drop=True)
+    )
+    bbl_set = set(df_cohort["bbl"])
+
+    v_hist = df_violations[
+        (df_violations["bbl"].isin(bbl_set))
+        & (df_violations["inspectiondate"] < cutoff)
+    ]
+
+    v_c = v_hist[v_hist["class"] == "C"]
+    v_b = v_hist[v_hist["class"] == "B"]
+    v_a = v_hist[v_hist["class"] == "A"]
+
+    c_1y = (
+        v_c[v_c["inspectiondate"] >= cutoff_1y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("c_viol_1y")
+    )
+    c_2y = (
+        v_c[v_c["inspectiondate"] >= cutoff_2y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("c_viol_2y")
+    )
+    c_3y = (
+        v_c[v_c["inspectiondate"] >= cutoff_3y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("c_viol_3y")
+    )
+    c_all = v_c.groupby("bbl").size().rename("c_viol_all")
+
+    b_1y = (
+        v_b[v_b["inspectiondate"] >= cutoff_1y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("b_viol_1y")
+    )
+    b_2y = (
+        v_b[v_b["inspectiondate"] >= cutoff_2y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("b_viol_2y")
+    )
+    b_3y = (
+        v_b[v_b["inspectiondate"] >= cutoff_3y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("b_viol_3y")
+    )
+
+    a_1y = (
+        v_a[v_a["inspectiondate"] >= cutoff_1y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("a_viol_1y")
+    )
+    a_2y = (
+        v_a[v_a["inspectiondate"] >= cutoff_2y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("a_viol_2y")
+    )
+
+    open_c = (
+        v_c[(v_c["currentstatusdate"].isna()) | (v_c["currentstatusdate"] >= cutoff)]
+        .groupby("bbl")
+        .size()
+        .rename("open_c_viol")
+    )
+
+    recency_c = ((cutoff - v_c.groupby("bbl")["inspectiondate"].max()).dt.days).rename(
+        "days_since_last_c"
+    )
+    recency_any = (
+        (cutoff - v_hist.groupby("bbl")["inspectiondate"].max()).dt.days
+    ).rename("days_since_last_any")
+
+    c_hist = df_complaints[
+        (df_complaints["bbl"].isin(bbl_set)) & (df_complaints["receiveddate"] < cutoff)
+    ]
+    comp_90d = (
+        c_hist[c_hist["receiveddate"] >= cutoff_90d_prior]
+        .groupby("bbl")
+        .size()
+        .rename("complaints_90d")
+    )
+    comp_1y = (
+        c_hist[c_hist["receiveddate"] >= cutoff_1y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("complaints_1y")
+    )
+    comp_2y = (
+        c_hist[c_hist["receiveddate"] >= cutoff_2y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("complaints_2y")
+    )
+    comp_3y = (
+        c_hist[c_hist["receiveddate"] >= cutoff_3y_prior]
+        .groupby("bbl")
+        .size()
+        .rename("complaints_3y")
+    )
+    recency_comp = (
+        (cutoff - c_hist.groupby("bbl")["receiveddate"].max()).dt.days
+    ).rename("days_since_last_comp")
+
+    vacate_cnt = (
+        df_vacate[
+            (df_vacate["bbl"].isin(bbl_set))
+            & (df_vacate["vacate_effective_date"] < cutoff)
+        ]
+        .groupby("bbl")
+        .size()
+        .rename("vacate_orders_hist")
+    )
+
+    lit_1y = (
+        df_lit[
+            (df_lit["bbl"].isin(bbl_set))
+            & (df_lit["caseopendate"] >= cutoff_1y_prior)
+            & (df_lit["caseopendate"] < cutoff)
+        ]
+        .groupby("bbl")
+        .size()
+        .rename("litigations_1y")
+    )
+
+    lit_3y = (
+        df_lit[
+            (df_lit["bbl"].isin(bbl_set))
+            & (df_lit["caseopendate"] >= cutoff_3y_prior)
+            & (df_lit["caseopendate"] < cutoff)
+        ]
+        .groupby("bbl")
+        .size()
+        .rename("litigations_3y")
+    )
+
+    features_to_join = [
+        c_1y,
+        c_2y,
+        c_3y,
+        c_all,
+        b_1y,
+        b_2y,
+        b_3y,
+        a_1y,
+        a_2y,
+        open_c,
+        recency_c,
+        recency_any,
+        comp_90d,
+        comp_1y,
+        comp_2y,
+        comp_3y,
+        recency_comp,
+        vacate_cnt,
+        lit_1y,
+        lit_3y,
+    ]
+    for feat in features_to_join:
+        df_cohort = df_cohort.merge(feat, on="bbl", how="left")
+
+    count_cols = [
+        "c_viol_1y",
+        "c_viol_2y",
+        "c_viol_3y",
+        "c_viol_all",
+        "b_viol_1y",
+        "b_viol_2y",
+        "b_viol_3y",
+        "a_viol_1y",
+        "a_viol_2y",
+        "open_c_viol",
+        "complaints_90d",
+        "complaints_1y",
+        "complaints_2y",
+        "complaints_3y",
+        "vacate_orders_hist",
+        "litigations_1y",
+        "litigations_3y",
+    ]
+    df_cohort[count_cols] = df_cohort[count_cols].fillna(0.0)
+    df_cohort["days_since_last_c"] = (
+        df_cohort["days_since_last_c"].fillna(3650.0).clip(0, 3650)
+    )
+    df_cohort["days_since_last_any"] = (
+        df_cohort["days_since_last_any"].fillna(3650.0).clip(0, 3650)
+    )
+    df_cohort["days_since_last_comp"] = (
+        df_cohort["days_since_last_comp"].fillna(3650.0).clip(0, 3650)
+    )
+    df_cohort["is_aep_building"] = df_cohort["bbl"].isin(aep_bbl_set).astype(float)
+
+    morph_records = [
+        pluto_features.get(
+            bbl,
+            {
+                "borocode": float(bbl[0]) if bbl and bbl[0].isdigit() else 1.0,
+                "unitsres": 1.0,
+                "unitstotal": 1.0,
+                "yearbuilt": 1950.0,
+                "numfloors": 3.0,
+                "bldgarea": 0.0,
+                "resarea": 0.0,
+                "lotarea": 0.0,
+                "cd": 101.0,
+                "bldgclass_first": "C",
+            },
+        )
+        for bbl in df_cohort["bbl"]
+    ]
+    df_morph = pd.DataFrame(morph_records, index=df_cohort.index)
+    df_cohort = pd.concat([df_cohort, df_morph], axis=1)
+
+    unitsres_safe = df_cohort["unitsres"].clip(lower=1.0)
+    floors_safe = df_cohort["numfloors"].clip(lower=1.0)
+    bldgarea_safe = df_cohort["bldgarea"].clip(lower=1.0)
+
+    cutoff_year = cutoff.year
+    df_cohort["building_age"] = (cutoff_year - df_cohort["yearbuilt"]).clip(0, 200)
+    df_cohort["is_prewar"] = (df_cohort["yearbuilt"] < 1940).astype(float)
+    df_cohort["is_pre1960"] = (df_cohort["yearbuilt"] < 1960).astype(float)
+    df_cohort["area_per_unit"] = (df_cohort["bldgarea"] / unitsres_safe).clip(0, 10000)
+    df_cohort["units_per_floor"] = (unitsres_safe / floors_safe).clip(0, 100)
+    df_cohort["res_area_ratio"] = (df_cohort["resarea"] / bldgarea_safe).clip(0, 1.0)
+    df_cohort["log_unitsres"] = np.log1p(unitsres_safe)
+    df_cohort["log_bldgarea"] = np.log1p(df_cohort["bldgarea"])
+
+    df_cohort["total_viol_1y"] = (
+        df_cohort["c_viol_1y"] + df_cohort["b_viol_1y"] + df_cohort["a_viol_1y"]
+    )
+    df_cohort["total_viol_2y"] = (
+        df_cohort["c_viol_2y"] + df_cohort["b_viol_2y"] + df_cohort["a_viol_2y"]
+    )
+    df_cohort["total_viol_3y"] = df_cohort["c_viol_3y"] + df_cohort["b_viol_3y"]
+
+    df_cohort["c_viol_1y_per_unit"] = df_cohort["c_viol_1y"] / unitsres_safe
+    df_cohort["c_viol_3y_per_unit"] = df_cohort["c_viol_3y"] / unitsres_safe
+    df_cohort["total_viol_1y_per_unit"] = df_cohort["total_viol_1y"] / unitsres_safe
+    df_cohort["complaints_90d_per_unit"] = df_cohort["complaints_90d"] / unitsres_safe
+    df_cohort["complaints_1y_per_unit"] = df_cohort["complaints_1y"] / unitsres_safe
+
+    c_viol_prior_year = (df_cohort["c_viol_2y"] - df_cohort["c_viol_1y"]).clip(
+        lower=0.0
+    )
+    df_cohort["c_viol_acceleration"] = (df_cohort["c_viol_1y"] + 0.1) / (
+        c_viol_prior_year + 0.1
+    )
+    df_cohort["complaint_velocity"] = (df_cohort["complaints_90d"] * 4.0 + 0.1) / (
+        df_cohort["complaints_1y"] + 0.1
+    )
+    df_cohort["c_severity_share_1y"] = df_cohort["c_viol_1y"] / (
+        df_cohort["total_viol_1y"] + 1.0
+    )
+    df_cohort["c_severity_share_3y"] = df_cohort["c_viol_3y"] / (
+        df_cohort["total_viol_3y"] + 1.0
+    )
+
+    cd_mean = df_cohort.groupby("cd")["c_viol_1y_per_unit"].transform("mean")
+    df_cohort["relative_c_viol_risk"] = df_cohort["c_viol_1y_per_unit"] / (
+        cd_mean + 1e-4
+    )
+
+    class_map = {
+        "A": 0,
+        "B": 1,
+        "C": 2,
+        "D": 3,
+        "E": 4,
+        "F": 5,
+        "G": 6,
+        "H": 7,
+        "I": 8,
+        "R": 9,
+        "S": 10,
+    }
+    df_cohort["bldgclass_code"] = (
+        df_cohort["bldgclass_first"].map(class_map).fillna(2).astype(float)
+    )
+    df_cohort = df_cohort.drop(columns=["bldgclass_first"])
+
+    if not is_test:
+        window_end = cutoff + pd.DateOffset(years=1)
+        v_target = df_violations[
+            (df_violations["class"] == "C")
+            & (df_violations["inspectiondate"] >= cutoff)
+            & (df_violations["inspectiondate"] < window_end)
+        ]
+        pos_bbls = set(v_target["bbl"].unique())
+        df_cohort["target"] = df_cohort["bbl"].isin(pos_bbls).astype(int)
+
+    return df_cohort
+
+
+train_entities = entity_universe_df["bbl"].unique()
+val_entities = entity_universe_df["bbl"].unique()
+
+train_df = compute_cohort_dataset("2021-01-01", train_entities, is_test=False)
+val_df = compute_cohort_dataset("2022-01-01", val_entities, is_test=False)
+test_df = compute_cohort_dataset("2023-01-01", test_bbls, is_test=True)
+
+test_df = test_entities_df[["bbl"]].merge(test_df, on="bbl", how="left")
+
+feature_cols = [c for c in val_df.columns if c not in ["bbl", "target"]]
+
+del df_violations, df_complaints, df_vacate, df_lit
+gc.collect()
+
+# ---------------------------------------------------------------------------
+# 5. Model Architecture: Explicit Feature-Cross Network (DCN-v2)
+# ---------------------------------------------------------------------------
+
+
+class CrossNetwork(nn.Module):
+    """Explicit bounded-degree feature crossing layer (DCN-v2 vector formulation).
+
+    x_{l+1} = x_0 * (x_l @ W_l) + b_l + x_l
+    """
+
+    def __init__(self, in_features: int, num_layers: int = 3):
+        super().__init__()
+        self.num_layers = num_layers
+        self.weights = nn.ParameterList(
+            [
+                nn.Parameter(torch.randn(in_features, 1) * 0.01)
+                for _ in range(num_layers)
+            ]
+        )
+        self.biases = nn.ParameterList(
+            [nn.Parameter(torch.zeros(in_features)) for _ in range(num_layers)]
+        )
+
+    def forward(self, x0: torch.Tensor) -> torch.Tensor:
+        xl = x0
+        for w, b in zip(self.weights, self.biases):
+            xl_w = torch.matmul(xl, w)
+            xl = x0 * xl_w + b + xl
+        return xl
+
+
+class DeepNetwork(nn.Module):
+    """Deep residual multilayer perceptron with batch normalization, SiLU activations, and dropout."""
+
+    def __init__(
+        self,
+        in_features: int,
+        hidden_dims: list = [128, 64],
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        layers = []
+        prev_dim = in_features
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, h_dim))
+            layers.append(nn.BatchNorm1d(h_dim))
+            layers.append(nn.SiLU())
+            layers.append(nn.Dropout(dropout))
+            prev_dim = h_dim
+        self.mlp = nn.Sequential(*layers)
+        self.out_dim = prev_dim
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)
+
+
+class DCNv2TabularRanker(nn.Module):
+    """Combines explicit Cross Network and Deep Non-linear MLP to predict housing violation risk scores."""
+
+    def __init__(
+        self,
+        num_features: int,
+        cross_layers: int = 3,
+        hidden_dims: list = [128, 64],
+        dropout: float = 0.2,
+    ):
+        super().__init__()
+        self.num_features = num_features
+        self.input_norm = nn.BatchNorm1d(num_features)
+        self.cross_net = CrossNetwork(num_features, num_layers=cross_layers)
+        self.deep_net = DeepNetwork(
+            num_features, hidden_dims=hidden_dims, dropout=dropout
+        )
+
+        combined_dim = num_features + self.deep_net.out_dim
+        self.head = nn.Sequential(
+            nn.Linear(combined_dim, 64),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_norm = self.input_norm(x)
+        cross_out = self.cross_net(x_norm)
+        deep_out = self.deep_net(x_norm)
+        combined = torch.cat([cross_out, deep_out], dim=1)
+        logits = self.head(combined)
+        return logits.squeeze(-1)
+
+
+class PairwiseRankingLoss(nn.Module):
+    """Hybrid criterion combining temperature-scaled pairwise margin ranking loss with binary cross-entropy."""
+
+    def __init__(
+        self,
+        temperature: float = 1.0,
+        bce_weight: float = 0.3,
+        max_pairs_per_batch: int = 1024,
+    ):
+        super().__init__()
+        self.temperature = temperature
+        self.bce_weight = bce_weight
+        self.max_pairs_per_batch = max_pairs_per_batch
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        bce_loss = self.bce(logits, targets)
+
+        pos_mask = targets == 1.0
+        neg_mask = targets == 0.0
+
+        pos_logits = logits[pos_mask]
+        neg_logits = logits[neg_mask]
+
+        if pos_logits.numel() == 0 or neg_logits.numel() == 0:
+            return bce_loss
+
+        if pos_logits.numel() > self.max_pairs_per_batch // 2:
+            perm_pos = torch.randperm(
+                pos_logits.numel(), device=logits.device
+            )[: self.max_pairs_per_batch // 2]
+            pos_logits = pos_logits[perm_pos]
+        if neg_logits.numel() > self.max_pairs_per_batch:
+            perm_neg = torch.randperm(
+                neg_logits.numel(), device=logits.device
+            )[: self.max_pairs_per_batch]
+            neg_logits = neg_logits[perm_neg]
+
+        diff = (pos_logits.unsqueeze(1) - neg_logits.unsqueeze(0)) / self.temperature
+        rank_loss = torch.mean(F.softplus(-diff))
+
+        return self.bce_weight * bce_loss + (1.0 - self.bce_weight) * rank_loss
+
+
+# ---------------------------------------------------------------------------
+# 6. Prepare Feature Matrices & Dataloaders
+# ---------------------------------------------------------------------------
+X_train_raw = train_df[feature_cols].values.astype(np.float32)
+y_train = train_df["target"].values.astype(np.float32)
+
+X_val_raw = val_df[feature_cols].values.astype(np.float32)
+y_val = val_df["target"].values.astype(np.float32)
+
+X_test_raw = test_df[feature_cols].values.astype(np.float32)
+
+X_train_raw = np.nan_to_num(X_train_raw, nan=0.0, posinf=0.0, neginf=0.0)
+X_val_raw = np.nan_to_num(X_val_raw, nan=0.0, posinf=0.0, neginf=0.0)
+X_test_raw = np.nan_to_num(X_test_raw, nan=0.0, posinf=0.0, neginf=0.0)
+
+scaler = StandardScaler()
+X_train_nn = scaler.fit_transform(X_train_raw).astype(np.float32)
+X_train_nn = np.nan_to_num(X_train_nn, nan=0.0, posinf=0.0, neginf=0.0)
+
+X_val_nn = scaler.transform(X_val_raw).astype(np.float32)
+X_val_nn = np.nan_to_num(X_val_nn, nan=0.0, posinf=0.0, neginf=0.0)
+
+X_test_nn = scaler.transform(X_test_raw).astype(np.float32)
+X_test_nn = np.nan_to_num(X_test_nn, nan=0.0, posinf=0.0, neginf=0.0)
+
+train_dataset = TensorDataset(torch.from_numpy(X_train_nn), torch.from_numpy(y_train))
+val_dataset = TensorDataset(torch.from_numpy(X_val_nn), torch.from_numpy(y_val))
+test_dataset = TensorDataset(torch.from_numpy(X_test_nn))
+
+train_loader = DataLoader(
+    train_dataset, batch_size=2048, shuffle=True, drop_last=False, num_workers=2
+)
+val_loader = DataLoader(
+    val_dataset, batch_size=4096, shuffle=False, drop_last=False, num_workers=2
+)
+test_loader = DataLoader(
+    test_dataset, batch_size=4096, shuffle=False, drop_last=False, num_workers=2
+)
+
+# ---------------------------------------------------------------------------
+# 7. Train DCN-v2 Tabular Ranker
+# ---------------------------------------------------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+model = DCNv2TabularRanker(
+    num_features=len(feature_cols),
+    cross_layers=3,
+    hidden_dims=[128, 64],
+    dropout=0.2,
+).to(device)
+
+criterion = PairwiseRankingLoss(temperature=1.0, bce_weight=0.3)
+optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10, eta_min=1e-5)
+
+best_val_ap = -1.0
+best_model_weights = None
+best_model_path = "./working/dcn_best_model.pt"
+
+for epoch in range(1, 11):
+    model.train()
+    running_loss = 0.0
+    total_samples = 0
+
+    for bx, by in train_loader:
+        bx = bx.to(device)
+        by = by.to(device)
+
+        optimizer.zero_grad()
+        logits = model(bx)
+        loss = criterion(logits, by)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+        optimizer.step()
+
+        running_loss += loss.item() * len(by)
+        total_samples += len(by)
+
+    scheduler.step()
+    avg_train_loss = running_loss / max(1, total_samples)
+
+    model.eval()
+    val_preds_list = []
+    with torch.no_grad():
+        for bx, _ in val_loader:
+            bx = bx.to(device)
+            logits = model(bx)
+            val_preds_list.append(logits.cpu().numpy())
+
+    val_preds_epoch = np.concatenate(val_preds_list)
+    val_ap_epoch = average_precision_score(y_val, val_preds_epoch)
+
+    print(
+        f"Epoch {epoch:02d}/10 | Train Loss: {avg_train_loss:.4f} | DCN Val AP: {val_ap_epoch:.5f}"
+    )
+
+    if val_ap_epoch > best_val_ap:
+        best_val_ap = val_ap_epoch
+        best_model_weights = copy.deepcopy(model.state_dict())
+
+if best_model_weights is not None:
+    torch.save(best_model_weights, best_model_path)
+    model.load_state_dict(best_model_weights)
+model.eval()
+
+val_preds_nn = []
+with torch.no_grad():
+    for batch in val_loader:
+        bx = batch[0].to(device)
+        logits = model(bx)
+        val_preds_nn.append(logits.cpu().numpy())
+val_preds_nn = np.concatenate(val_preds_nn)
+
+test_preds_nn = []
+with torch.no_grad():
+    for batch in test_loader:
+        bx = batch[0].to(device)
+        logits = model(bx)
+        test_preds_nn.append(logits.cpu().numpy())
+test_preds_nn = np.concatenate(test_preds_nn)
+
+# ---------------------------------------------------------------------------
+# 8. Train Complementary Gradient Boosted Trees (LightGBM)
+# ---------------------------------------------------------------------------
+lgb_params = {
+    "objective": "binary",
+    "metric": "average_precision",
+    "boosting_type": "gbdt",
+    "n_estimators": 1000,
+    "learning_rate": 0.03,
+    "num_leaves": 31,
+    "max_depth": 6,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 1.0,
+    "reg_lambda": 3.0,
+    "min_child_samples": 50,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbose": -1,
+}
+
+lgb_model = lgb.LGBMClassifier(**lgb_params)
+try:
+    lgb_model.fit(
+        X_train_raw,
+        y_train,
+        eval_set=[(X_val_raw, y_val)],
+        callbacks=[
+            lgb.early_stopping(stopping_rounds=50, verbose=False),
+            lgb.log_evaluation(period=0),
+        ],
+    )
+except Exception:
+    lgb_params["metric"] = "auc"
+    lgb_model = lgb.LGBMClassifier(**lgb_params)
+    lgb_model.fit(
+        X_train_raw,
+        y_train,
+        eval_set=[(X_val_raw, y_val)],
+        callbacks=[
+            lgb.early_stopping(stopping_rounds=50, verbose=False),
+            lgb.log_evaluation(period=0),
+        ],
+    )
+
+val_preds_lgb = lgb_model.predict_proba(X_val_raw)[:, 1]
+test_preds_lgb = lgb_model.predict_proba(X_test_raw)[:, 1]
+
+# ---------------------------------------------------------------------------
+# 9. Rank Normalization, Metric Optimization & Ensembling
+# ---------------------------------------------------------------------------
+val_rank_nn = (rankdata(val_preds_nn) - 1.0) / (len(val_preds_nn) - 1.0)
+val_rank_lgb = (rankdata(val_preds_lgb) - 1.0) / (len(val_preds_lgb) - 1.0)
+
+test_rank_nn = (rankdata(test_preds_nn) - 1.0) / (len(test_preds_nn) - 1.0)
+test_rank_lgb = (rankdata(test_preds_lgb) - 1.0) / (len(test_preds_lgb) - 1.0)
+
+best_score = -1.0
+best_weight = 0.5
+
+for w in np.linspace(0.0, 1.0, 21):
+    blended_val = w * val_rank_lgb + (1.0 - w) * val_rank_nn
+    ap_score = average_precision_score(y_val, blended_val)
+    if ap_score > best_score:
+        best_score = ap_score
+        best_weight = w
+
+score = best_score
+final_test_score = best_weight * test_rank_lgb + (1.0 - best_weight) * test_rank_nn
+
+# ---------------------------------------------------------------------------
+# 10. Export Verified Submission File
+# ---------------------------------------------------------------------------
+submission_df = pd.DataFrame({"bbl": test_df["bbl"].values, "score": final_test_score})
+submission_df["score"] = submission_df["score"].fillna(0.0)
+
+assert len(submission_df) == 171587, f"Expected 171587 rows, got {len(submission_df)}"
+assert submission_df["bbl"].nunique() == 171587, "Duplicate BBLs found in submission"
+assert not submission_df["score"].isna().any(), "NaN values found in submission"
+assert not np.isinf(submission_df["score"]).any(), "Inf values found in submission"
+
+submission_df.to_csv("./submission/submission.csv", index=False)
+
+print(f"Final Validation Score: {score:.5f}")

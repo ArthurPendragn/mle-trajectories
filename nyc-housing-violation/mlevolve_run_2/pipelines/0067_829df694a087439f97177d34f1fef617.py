@@ -1,0 +1,3332 @@
+import gc
+import json
+import math
+import os
+import warnings
+import gcsfs
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import pyarrow.dataset as ds
+import xgboost as xgb
+from scipy.stats import rankdata
+from sklearn.metrics import average_precision_score
+from sklearn.preprocessing import QuantileTransformer, StandardScaler
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import (
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+    LinearLR,
+    SequentialLR,
+)
+from torch.utils.data import DataLoader, TensorDataset
+
+warnings.filterwarnings("ignore")
+
+# ---------------------------------------------------------
+# 1. HARDWARE DETERMINISM & CLOUD STORAGE CONNECTION
+# ---------------------------------------------------------
+torch.manual_seed(42)
+np.random.seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+GCS_BASE = "gs://mle-nyc-lake/tasks/housing_violation_risk/v1"
+TOKEN_PATH = (
+    "/home/estrauss-ldap/datasets/housing_violation_risk/nyc-lake-agent-key.json"
+)
+
+token_val = (
+    TOKEN_PATH
+    if os.path.exists(TOKEN_PATH)
+    else os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", None)
+)
+storage_options = {"token": token_val} if token_val else {}
+fs = gcsfs.GCSFileSystem(token=token_val) if token_val else gcsfs.GCSFileSystem()
+
+os.makedirs("submission", exist_ok=True)
+os.makedirs("working", exist_ok=True)
+
+
+# ---------------------------------------------------------
+# 2. ROBUST BBL STANDARDIZATION & LAKE HELPER
+# ---------------------------------------------------------
+def clean_bbl_to_int(
+    df, bbl_col="bbl", boro_col="boroid", block_col="block", lot_col="lot"
+):
+    """Vectorized conversion of heterogeneous NYC tax lot identifiers into int64."""
+    n = len(df)
+    res = np.full(n, -1, dtype=np.int64)
+
+    if bbl_col in df.columns:
+        bbl_num = pd.to_numeric(df[bbl_col], errors="coerce").fillna(-1).values
+        valid_mask = (bbl_num >= 1000000000) & (bbl_num < 6000000000)
+        res[valid_mask] = bbl_num[valid_mask].astype(np.int64)
+
+    need_fallback = res == -1
+    if need_fallback.any():
+        actual_boro_col = None
+        for cand in [boro_col, "boroid", "boro", "borocode", "borough"]:
+            if cand in df.columns:
+                actual_boro_col = cand
+                break
+
+        if (
+            actual_boro_col is not None
+            and block_col in df.columns
+            and lot_col in df.columns
+        ):
+            b_vals = (
+                pd.to_numeric(df[actual_boro_col], errors="coerce").fillna(-1).values
+            )
+            if np.all(b_vals == -1) and df[actual_boro_col].dtype == object:
+                boro_map = {
+                    "MANHATTAN": 1,
+                    "MN": 1,
+                    "BRONX": 2,
+                    "BX": 2,
+                    "BROOKLYN": 3,
+                    "BK": 3,
+                    "QUEENS": 4,
+                    "QN": 4,
+                    "STATEN ISLAND": 5,
+                    "SI": 5,
+                }
+                b_vals = (
+                    df[actual_boro_col]
+                    .astype(str)
+                    .str.upper()
+                    .str.strip()
+                    .map(boro_map)
+                    .fillna(-1)
+                    .values
+                )
+
+            blk_vals = pd.to_numeric(df[block_col], errors="coerce").fillna(-1).values
+            lot_vals = pd.to_numeric(df[lot_col], errors="coerce").fillna(-1).values
+
+            fb_mask = (
+                need_fallback
+                & (b_vals >= 1)
+                & (b_vals <= 5)
+                & (blk_vals >= 0)
+                & (blk_vals <= 99999)
+                & (lot_vals >= 0)
+                & (lot_vals <= 9999)
+            )
+
+            if fb_mask.any():
+                res[fb_mask] = (
+                    b_vals[fb_mask].astype(np.int64) * 1_000_000_000
+                    + blk_vals[fb_mask].astype(np.int64) * 10_000
+                    + lot_vals[fb_mask].astype(np.int64)
+                )
+
+    return res
+
+
+def get_available_columns(gcs_table_path):
+    path_no_gs = gcs_table_path.replace("gs://", "")
+    dataset = ds.dataset(path_no_gs, filesystem=fs, format="parquet")
+    return dataset.schema.names
+
+
+# ---------------------------------------------------------
+# 3. LOAD DATA FROM NYC LAKE (PLUTO & HPD VIOLATIONS)
+# ---------------------------------------------------------
+print("Loading PLUTO releases...")
+pluto_path = f"{GCS_BASE}/lake/full/pluto"
+pluto_avail_cols = get_available_columns(pluto_path)
+pluto_avail_map = {c.lower(): c for c in pluto_avail_cols}
+desired_pluto_cols = [
+    "bbl",
+    "borough",
+    "borocode",
+    "block",
+    "lot",
+    "ownername",
+    "bldgfront",
+    "bldgdepth",
+    "numbldgs",
+    "unitsres",
+    "unitstotal",
+    "yearbuilt",
+    "yearalter1",
+    "yearalter2",
+    "tract2010",
+    "ct2010",
+    "bldgclass",
+    "landuse",
+    "bldgarea",
+    "resarea",
+    "numfloors",
+    "lotarea",
+    "assessland",
+    "assesstot",
+    "zipcode",
+    "cd",
+    "condono",
+    "proxcode",
+    "bsmtcode",
+    "builtfar",
+    "residfar",
+    "version",
+    "release",
+    "pluto_version",
+]
+pluto_cols = [pluto_avail_map[c] for c in desired_pluto_cols if c in pluto_avail_map]
+df_pluto = pd.read_parquet(
+    pluto_path, storage_options=storage_options, columns=pluto_cols
+)
+df_pluto.columns = [c.lower() for c in df_pluto.columns]
+df_pluto["bbl_int"] = clean_bbl_to_int(df_pluto)
+df_pluto = df_pluto[df_pluto["bbl_int"] > 0].copy()
+
+version_col = next(
+    (
+        c
+        for c in df_pluto.columns
+        if c.lower() in ["version", "release", "pluto_version"]
+    ),
+    None,
+)
+if version_col is None:
+    version_col = next(
+        (c for c in df_pluto.columns if "ver" in c.lower() or "rel" in c.lower()),
+        None,
+    )
+
+print("Loading test entities...")
+df_test = pd.read_parquet(
+    f"{GCS_BASE}/test_entities.parquet", storage_options=storage_options
+)
+df_test["bbl_int"] = clean_bbl_to_int(df_test)
+df_test["bbl_str"] = df_test["bbl_int"].apply(lambda x: f"{x:010d}")
+
+print("Loading HPD violations...")
+viol_path = f"{GCS_BASE}/lake/full/hpd_violations"
+viol_avail_cols = get_available_columns(viol_path)
+viol_avail_map = {c.lower(): c for c in viol_avail_cols}
+desired_viol_cols = [
+    "bbl",
+    "boroid",
+    "boro",
+    "block",
+    "lot",
+    "class",
+    "inspectiondate",
+    "violationstatus",
+    "rentimpairing",
+    "apartment",
+    "novdescription",
+    "ordernumber",
+    "currentstatus",
+    "currentstatusdate",
+    "originalcertifybydate",
+    "originalcorrectbydate",
+    "certificationstatus",
+]
+viol_cols = [viol_avail_map[c.lower()] for c in desired_viol_cols if c.lower() in viol_avail_map]
+df_viol = pd.read_parquet(viol_path, storage_options=storage_options, columns=viol_cols)
+df_viol.columns = [c.lower() for c in df_viol.columns]
+df_viol["bbl_int"] = clean_bbl_to_int(df_viol)
+df_viol = df_viol[df_viol["bbl_int"] > 0].copy()
+df_viol["insp_dt"] = pd.to_datetime(
+    df_viol["inspectiondate"], errors="coerce", utc=True
+).dt.tz_localize(None)
+df_viol = df_viol[df_viol["insp_dt"].notna()].copy()
+df_viol["class_clean"] = df_viol["class"].astype(str).str.strip().str.upper()
+if "violationstatus" in df_viol.columns:
+    df_viol["status_clean"] = df_viol["violationstatus"].fillna("").astype(str).str.strip().str.upper()
+else:
+    df_viol["status_clean"] = "OPEN"
+if "rentimpairing" in df_viol.columns:
+    df_viol["is_rentimpairing"] = (
+        df_viol["rentimpairing"].fillna("").astype(str).str.strip().str.upper().isin(["Y", "YES", "TRUE", "1"])
+    )
+else:
+    df_viol["is_rentimpairing"] = False
+if "apartment" in df_viol.columns:
+    df_viol["apartment_clean"] = df_viol["apartment"].fillna("").astype(str).str.strip()
+else:
+    df_viol["apartment_clean"] = ""
+if "currentstatusdate" in df_viol.columns:
+    df_viol["status_dt"] = pd.to_datetime(
+        df_viol["currentstatusdate"], errors="coerce", utc=True
+    ).dt.tz_localize(None)
+else:
+    df_viol["status_dt"] = pd.NaT
+if "originalcorrectbydate" in df_viol.columns:
+    df_viol["correct_by_dt"] = pd.to_datetime(
+        df_viol["originalcorrectbydate"], errors="coerce", utc=True
+    ).dt.tz_localize(None)
+else:
+    df_viol["correct_by_dt"] = pd.NaT
+
+# Precompute statutory hazard masks and defective certification flags
+viol_text = pd.Series("", index=df_viol.index)
+if "novdescription" in df_viol.columns:
+    viol_text = viol_text + " " + df_viol["novdescription"].fillna("").astype(str).str.upper()
+if "ordernumber" in df_viol.columns:
+    viol_text = viol_text + " ORD_" + df_viol["ordernumber"].fillna("").astype(str).str.upper()
+
+df_viol["is_lead"] = viol_text.str.contains(r"LEAD|ORD_616|ORD_617|ORD_618|ORD_619|ORD_620|ORD_621|LOCAL LAW 1", regex=True)
+df_viol["is_heat"] = viol_text.str.contains(r"HEAT|HOT WATER|HOT_WATER|BOILER|ORD_501|ORD_502|ORD_503|ORD_504|ORD_505|ORD_506", regex=True)
+df_viol["is_windowguard"] = viol_text.str.contains(r"WINDOW GUARD|WINDOW-GUARD|WINDOWGUARD|ORD_608|ORD_609|ORD_610|ORD_611|ORD_612|ORD_613|ORD_614", regex=True)
+df_viol["is_mold_leak"] = viol_text.str.contains(r"MOLD|MILDEW|LEAK|SEWAGE|PLUMBING", regex=True)
+df_viol["is_vermin"] = viol_text.str.contains(r"ROACH|MICE|MOUSE|RAT|RODENT|VERMIN|BEDBUG|INFEST", regex=True)
+df_viol["is_fire_safety"] = viol_text.str.contains(
+    r"FIRE|DOOR|SELF-CLOSING|SELF CLOSING|EGRESS|ESCAPE|ORD_652|ORD_508|ORD_555|ORD_556|ORD_653|ORD_654|ORD_655",
+    regex=True,
+)
+df_viol["is_alarm"] = viol_text.str.contains(
+    r"SMOKE|CARBON MONOXIDE|CO DETECTOR|ALARM|ORD_507|ORD_509",
+    regex=True,
+)
+df_viol["is_gas"] = viol_text.str.contains(
+    r"COOKING GAS|GAS SHUT|GAS PIP|ORD_520|ORD_521|ORD_522|ORD_523|ORD_524|ORD_525",
+    regex=True,
+)
+apt_clean_s = df_viol["apartment_clean"].astype(str).str.upper()
+df_viol["is_common_area"] = apt_clean_s.str.contains(
+    r"BOILER|BASEMENT|BSMT|CELLAR|HALL|CORRIDOR|STAIR|ROOF|LOBBY|PUBLIC|COMMON|VESTIBULE|ELEVATOR",
+    regex=True,
+)
+
+cert_text = pd.Series("", index=df_viol.index)
+if "currentstatus" in df_viol.columns:
+    cert_text = cert_text + " " + df_viol["currentstatus"].fillna("").astype(str).str.upper()
+if "certificationstatus" in df_viol.columns:
+    cert_text = cert_text + " " + df_viol["certificationstatus"].fillna("").astype(str).str.upper()
+if "violationstatus" in df_viol.columns:
+    cert_text = cert_text + " " + df_viol["violationstatus"].fillna("").astype(str).str.upper()
+df_viol["is_defective_cert"] = cert_text.str.contains(r"DEFECT|INVALID|FALSE|REJECT", regex=True)
+
+# ---------------------------------------------------------
+# 4. LOAD AUXILIARY MUNICIPAL DISTRESS DATA
+# ---------------------------------------------------------
+print("Loading HPD physical buildings and structural lot multiplicity...")
+try:
+    bldg_path = f"{GCS_BASE}/lake/full/hpd_buildings"
+    bldg_avail_cols = get_available_columns(bldg_path)
+    bldg_avail_norm = {c.lower().replace("_", "").replace(" ", ""): c for c in bldg_avail_cols}
+    desired_bldg_c = [
+        "bbl", "boroid", "boro", "borocode", "borough", "block", "lot",
+        "buildingid", "stories", "storycount", "floors"
+    ]
+    load_bldg_c = [bldg_avail_norm[k] for k in bldg_avail_norm if any(k == d.replace("_", "") for d in desired_bldg_c)]
+    df_hpd_bldg = pd.read_parquet(bldg_path, storage_options=storage_options, columns=load_bldg_c)
+    df_hpd_bldg.columns = [c.lower().replace(" ", "_") for c in df_hpd_bldg.columns]
+    df_hpd_bldg["bbl_int"] = clean_bbl_to_int(df_hpd_bldg)
+    df_hpd_bldg = df_hpd_bldg[df_hpd_bldg["bbl_int"] > 0].copy()
+
+    st_col = next((c for c in df_hpd_bldg.columns if "stori" in c or "floor" in c), None)
+    if st_col:
+        df_hpd_bldg["stories_clean"] = pd.to_numeric(df_hpd_bldg[st_col], errors="coerce").fillna(1.0).clip(1, 120)
+    else:
+        df_hpd_bldg["stories_clean"] = 1.0
+
+    bldg_agg = df_hpd_bldg.groupby("bbl_int").agg(
+        hpd_bldg_count=("stories_clean", "count"),
+        hpd_max_stories=("stories_clean", "max"),
+        hpd_mean_stories=("stories_clean", "mean"),
+    )
+    bldg_count_map = bldg_agg["hpd_bldg_count"].to_dict()
+    bldg_max_stories_map = bldg_agg["hpd_max_stories"].to_dict()
+    bldg_mean_stories_map = bldg_agg["hpd_mean_stories"].to_dict()
+    print(f"Loaded {len(bldg_agg)} unique BBLs from hpd_buildings.")
+    del df_hpd_bldg, bldg_agg
+    gc.collect()
+except Exception as e:
+    print(f"Notice loading hpd_buildings: {e}")
+    bldg_count_map = {}
+    bldg_max_stories_map = {}
+    bldg_mean_stories_map = {}
+
+print("Loading auxiliary municipal distress indicators...")
+
+
+def safe_load_aux_bbl(table_name, date_cands=None):
+    try:
+        t_path = f"{GCS_BASE}/lake/full/{table_name}"
+        cols = get_available_columns(t_path)
+        cols_norm_map = {c.lower().replace(" ", "").replace("_", ""): c for c in cols}
+        target_keys = [
+            "bbl",
+            "boroid",
+            "boro",
+            "borocode",
+            "borough",
+            "block",
+            "lot",
+            "buildingid",
+            "actualchargeamount",
+            "chargeamount",
+            "amount",
+            "totalamount",
+            "saleprice",
+            "price",
+            "grosssquarefeet",
+            "grosssqft",
+            "totalunits",
+            "residentialunits",
+            "infesteddwellingunitcount",
+            "infestedunits",
+            "result",
+            "inspectionresult",
+            "casestatus",
+            "case_status",
+            "status",
+            "casetype",
+            "case_type",
+            "type",
+            "penalty",
+            "civilpenalty",
+            "penaltyamount",
+            "severity",
+            "violationseverity",
+            "violationclass",
+            "violationtype",
+            "violationcategory",
+            "category",
+            "description",
+            "violationdescription",
+            "novdescription",
+            "balancedue",
+            "penaltiesbalancedue",
+            "penaltybalance",
+            "totalviolationamount",
+            "penaltyimposed",
+            "amountpaid",
+            "devicetype",
+            "device_type",
+            "casedescription",
+        ]
+        keep = []
+        for k in target_keys:
+            if k in cols_norm_map and cols_norm_map[k] not in keep:
+                keep.append(cols_norm_map[k])
+
+        dt_col = None
+        if date_cands:
+            for dc in date_cands:
+                dc_norm = dc.lower().replace(" ", "").replace("_", "")
+                for c in cols:
+                    c_norm = c.lower().replace(" ", "").replace("_", "")
+                    if "flag" in c_norm:
+                        continue
+                    if c_norm == dc_norm:
+                        if c not in keep:
+                            keep.append(c)
+                        dt_col = c
+                        break
+                if dt_col:
+                    break
+        df_aux = pd.read_parquet(t_path, storage_options=storage_options, columns=keep)
+        df_aux.columns = [c.lower().replace(" ", "_") for c in df_aux.columns]
+        df_aux["bbl_int"] = clean_bbl_to_int(df_aux)
+        df_aux = df_aux[df_aux["bbl_int"] > 0].copy()
+        if dt_col:
+            dt_col_clean = dt_col.lower().replace(" ", "_")
+            df_aux["event_dt"] = pd.to_datetime(
+                df_aux[dt_col_clean], errors="coerce", utc=True
+            ).dt.tz_localize(None)
+        else:
+            df_aux["event_dt"] = pd.NaT
+
+        amt_col = next(
+            (
+                c
+                for c in df_aux.columns
+                if any(
+                    k in c.replace("_", "")
+                    for k in [
+                        "actualchargeamount",
+                        "chargeamount",
+                        "saleprice",
+                        "price",
+                        "amount",
+                        "penalty",
+                    ]
+                )
+            ),
+            None,
+        )
+        if amt_col:
+            if df_aux[amt_col].dtype == object:
+                clean_s = df_aux[amt_col].astype(str).str.replace(r"[$,]", "", regex=True)
+                df_aux["amount"] = pd.to_numeric(clean_s, errors="coerce").fillna(0.0)
+            else:
+                df_aux["amount"] = pd.to_numeric(df_aux[amt_col], errors="coerce").fillna(0.0)
+        else:
+            df_aux["amount"] = 0.0
+
+        bal_col = next(
+            (
+                c
+                for c in df_aux.columns
+                if any(
+                    k in c.replace("_", "")
+                    for k in [
+                        "balancedue",
+                        "penaltiesbalancedue",
+                        "penaltybalance",
+                        "balance",
+                    ]
+                )
+            ),
+            None,
+        )
+        if bal_col:
+            if df_aux[bal_col].dtype == object:
+                clean_b = df_aux[bal_col].astype(str).str.replace(r"[$,]", "", regex=True)
+                df_aux["balance_due"] = pd.to_numeric(clean_b, errors="coerce").fillna(0.0).clip(lower=0.0)
+            else:
+                df_aux["balance_due"] = pd.to_numeric(df_aux[bal_col], errors="coerce").fillna(0.0).clip(lower=0.0)
+        else:
+            df_aux["balance_due"] = 0.0
+
+        inf_col = next(
+            (c for c in df_aux.columns if "infested" in c or "inf_units" in c),
+            None,
+        )
+        if inf_col:
+            df_aux["infested_units"] = pd.to_numeric(
+                df_aux[inf_col], errors="coerce"
+            ).fillna(0.0)
+        else:
+            df_aux["infested_units"] = 0.0
+
+        return df_aux
+    except Exception as e:
+        print(f"Notice loading {table_name}: {e}")
+        return pd.DataFrame(
+            columns=["bbl_int", "event_dt", "amount", "infested_units", "balance_due"]
+        )
+
+
+df_lit = safe_load_aux_bbl(
+    "hpd_litigations", ["caseopendate", "case_open_date", "opendate"]
+)
+st_col_lit = next((c for c in df_lit.columns if "status" in c), None)
+if st_col_lit:
+    df_lit["is_open_lit"] = df_lit[st_col_lit].astype(str).str.upper().str.contains("OPEN|ACTIVE|PENDING")
+else:
+    df_lit["is_open_lit"] = True
+
+lit_text = pd.Series("", index=df_lit.index)
+for col in df_lit.columns:
+    if df_lit[col].dtype == object and col not in ["bbl_int"]:
+        lit_text = lit_text + " " + df_lit[col].fillna("").astype(str).str.upper()
+
+df_lit["is_hp_action"] = lit_text.str.contains(r"HP|TENANT|HEAT", regex=True)
+df_lit["is_comprehensive"] = lit_text.str.contains(r"COMPREHENSIVE|COMP", regex=True)
+df_lit["is_access"] = lit_text.str.contains(r"ACCESS|WARRANT", regex=True)
+df_vacate = safe_load_aux_bbl(
+    "hpd_vacate_orders",
+    ["vacate_effective_date", "effective_date", "vacatedate"],
+)
+df_aep = safe_load_aux_bbl("hpd_aep_buildings")
+df_conh = safe_load_aux_bbl("hpd_conh_buildings")
+df_hwo = safe_load_aux_bbl(
+    "hpd_hwo_charges",
+    [
+        "chargedate",
+        "charge_date",
+        "approvaldate",
+        "approval_date",
+        "fee_date",
+        "invoicedate",
+        "invoice_date",
+        "date",
+    ],
+)
+df_evict = safe_load_aux_bbl(
+    "evictions", ["executed_date", "eviction_date", "ejection_date"]
+)
+df_omo = safe_load_aux_bbl(
+    "hpd_omo_charges",
+    [
+        "invoicedate",
+        "chargedate",
+        "invoice_date",
+        "charge_date",
+        "approvaldate",
+        "approveddate",
+    ],
+)
+df_bedbug = safe_load_aux_bbl(
+    "hpd_bedbug_reports",
+    [
+        "filingdate",
+        "filing_date",
+        "receiveddate",
+        "received_date",
+        "inspectiondate",
+        "inspection_date",
+        "reportdate",
+        "report_date",
+        "date",
+    ],
+)
+
+# Cross-agency distress datasets: DOB violations, DOB ECB violations, and Rodent inspections
+print("Loading DOB violations, DOB ECB violations, and DOHMH rodent inspections...")
+df_dob = safe_load_aux_bbl(
+    "dob_violations",
+    ["issue_date", "issuedate", "violation_date", "date", "inspection_date", "inspectiondate"],
+)
+df_dob_ecb = safe_load_aux_bbl(
+    "dob_ecb_violations",
+    ["issue_date", "issuedate", "served_date", "violation_date", "hearing_date", "date"],
+)
+
+ecb_text = pd.Series("", index=df_dob_ecb.index)
+for col in df_dob_ecb.columns:
+    if df_dob_ecb[col].dtype == object and col not in ["bbl_int"]:
+        ecb_text = ecb_text + " " + df_dob_ecb[col].fillna("").astype(str).str.upper()
+
+df_dob_ecb["is_class1"] = ecb_text.str.contains(
+    r"CLASS\s*1|IMMEDIATELY\s*HAZARDOUS|HAZARDOUS\s*CLASS\s*1|\bHAZ\s*1\b|\bCL\s*1\b",
+    regex=True,
+)
+
+df_rodent = safe_load_aux_bbl(
+    "dohmh_rodent_inspections",
+    ["inspection_date", "inspectiondate", "date", "inspect_date"],
+)
+
+if "result" in df_rodent.columns or "inspection_result" in df_rodent.columns:
+    res_c = "result" if "result" in df_rodent.columns else "inspection_result"
+    is_failed = df_rodent[res_c].astype(str).str.lower().str.contains("fail|rat|problem|active|violation|action")
+    df_rodent_fail = df_rodent[is_failed].copy() if is_failed.sum() > 0 else df_rodent.copy()
+else:
+    df_rodent_fail = df_rodent
+
+print("Loading DOB safety violations, DOF tax lien sales, and HPD underlying conditions...")
+df_dob_safety = safe_load_aux_bbl(
+    "dob_safety_violations",
+    ["issue_date", "issuedate", "violation_date", "date", "inspection_date", "inspectiondate"],
+)
+
+safety_text = pd.Series("", index=df_dob_safety.index)
+for col in df_dob_safety.columns:
+    if df_dob_safety[col].dtype == object and col not in ["bbl_int"]:
+        safety_text = safety_text + " " + df_dob_safety[col].fillna("").astype(str).str.upper()
+
+df_dob_safety["is_elevator"] = safety_text.str.contains(r"ELEVATOR|LIFT|ESCALATOR|\bELEV\b", regex=True)
+df_dob_safety["is_boiler"] = safety_text.str.contains(r"BOILER|PRESSURE\s*VESSEL|BURNER|\bBLR\b", regex=True)
+df_tax_lien = safe_load_aux_bbl(
+    "dof_tax_lien_sales",
+    ["sale_date", "saledate", "lien_sale_date", "notice_date", "date", "year"],
+)
+df_underlying = safe_load_aux_bbl(
+    "hpd_underlying_conditions",
+    ["order_date", "orderdate", "notice_date", "date", "inspection_date"],
+)
+
+print("Loading DOF annualized sales and speculation watch list...")
+df_sales = safe_load_aux_bbl(
+    "dof_annualized_sales",
+    ["sale_date", "saledate", "date", "deed_date", "document_date"],
+)
+df_speculation = safe_load_aux_bbl(
+    "speculation_watch_list",
+    ["date", "record_date", "as_of_date"],
+)
+
+print("Loading HPD registrations...")
+try:
+    reg_path = f"{GCS_BASE}/lake/full/hpd_registrations"
+    reg_avail_cols = get_available_columns(reg_path)
+    reg_id_col = next(
+        (
+            c
+            for c in reg_avail_cols
+            if any(
+                k in c.lower()
+                for k in ["registrationid", "registration_id", "regid", "reg_id"]
+            )
+        ),
+        None,
+    )
+    reg_dt_cands = [
+        "lastregistrationdate",
+        "last_registration_date",
+        "registrationdate",
+        "registration_date",
+        "date",
+    ]
+    reg_dt_col = next(
+        (c for c in reg_dt_cands if c.lower() in [col.lower() for col in reg_avail_cols]),
+        None,
+    )
+
+    desired_reg_cols = [
+        c
+        for c in ["bbl", "boroid", "boro", "block", "lot"]
+        if c in reg_avail_cols
+    ]
+    if reg_id_col and reg_id_col not in desired_reg_cols:
+        desired_reg_cols.append(reg_id_col)
+    if reg_dt_col and reg_dt_col not in desired_reg_cols:
+        desired_reg_cols.append(reg_dt_col)
+
+    df_reg = pd.read_parquet(
+        reg_path, storage_options=storage_options, columns=desired_reg_cols
+    )
+    df_reg.columns = [c.lower() for c in df_reg.columns]
+    df_reg["bbl_int"] = clean_bbl_to_int(df_reg)
+    df_reg = df_reg[df_reg["bbl_int"] > 0].copy()
+    if reg_id_col:
+        reg_id_lower = reg_id_col.lower()
+        df_reg["registrationid"] = (
+            pd.to_numeric(df_reg[reg_id_lower], errors="coerce")
+            .fillna(-1)
+            .astype(np.int64)
+        )
+    else:
+        df_reg["registrationid"] = -1
+
+    if reg_dt_col:
+        df_reg["event_dt"] = pd.to_datetime(
+            df_reg[reg_dt_col.lower()], errors="coerce", utc=True
+        ).dt.tz_localize(None)
+    else:
+        df_reg["event_dt"] = pd.NaT
+except Exception as e:
+    print(f"Notice loading registrations: {e}")
+    df_reg = pd.DataFrame(columns=["bbl_int", "registrationid", "event_dt"])
+
+print("Loading HPD registration contacts for landlord portfolio linkage...")
+reg_to_landlord = {}
+try:
+    contacts_path = f"{GCS_BASE}/lake/full/hpd_registration_contacts"
+    contacts_avail_cols = get_available_columns(contacts_path)
+    contacts_norm_map = {c.lower().replace(" ", "").replace("_", ""): c for c in contacts_avail_cols}
+    target_c_cols = ["registrationid", "corporationname", "businessstreetname", "businesszip"]
+    load_contacts_cols = [contacts_norm_map[k] for k in target_c_cols if k in contacts_norm_map]
+
+    if len(load_contacts_cols) > 0:
+        df_contacts = pd.read_parquet(
+            contacts_path, storage_options=storage_options, columns=load_contacts_cols
+        )
+        df_contacts.columns = [c.lower().replace(" ", "").replace("_", "") for c in df_contacts.columns]
+        if "registrationid" in df_contacts.columns:
+            df_contacts["registrationid"] = pd.to_numeric(
+                df_contacts["registrationid"], errors="coerce"
+            ).fillna(-1).astype(np.int64)
+            df_contacts = df_contacts[df_contacts["registrationid"] > 0]
+
+            c_name = (
+                df_contacts["corporationname"].fillna("").astype(str).str.strip().str.upper()
+                if "corporationname" in df_contacts.columns
+                else pd.Series("", index=df_contacts.index)
+            )
+            b_st = (
+                df_contacts["businessstreetname"].fillna("").astype(str).str.strip().str.upper()
+                if "businessstreetname" in df_contacts.columns
+                else pd.Series("", index=df_contacts.index)
+            )
+            b_zip = (
+                df_contacts["businesszip"].fillna("").astype(str).str.strip().str.split(".").str[0]
+                if "businesszip" in df_contacts.columns
+                else pd.Series("", index=df_contacts.index)
+            )
+
+            invalid_corps = {"", "NAN", "NONE", "NULL", "UNKNOWN", "N/A", "NA"}
+            valid_corp = ~c_name.isin(invalid_corps) & (c_name.str.len() >= 3)
+            valid_addr = (~b_st.isin(invalid_corps)) & (b_st.str.len() >= 3) & (~b_zip.isin(invalid_corps)) & (b_zip.str.len() >= 3)
+
+            tag = np.where(valid_corp, "CORP_" + c_name, np.where(valid_addr, "ADDR_" + b_st + "_" + b_zip, ""))
+            df_contacts["landlord_tag"] = tag
+            df_contacts["tag_len"] = df_contacts["landlord_tag"].str.len()
+            df_contacts_sorted = df_contacts.sort_values(
+                ["registrationid", "tag_len"], ascending=[True, False]
+            ).drop_duplicates(subset=["registrationid"], keep="first")
+
+            reg_to_landlord = dict(
+                zip(df_contacts_sorted["registrationid"], df_contacts_sorted["landlord_tag"])
+            )
+            print(f"Resolved {len(reg_to_landlord)} corporate landlord mappings from contacts.")
+            del df_contacts, df_contacts_sorted
+            gc.collect()
+except Exception as e:
+    print(f"Notice loading registration contacts: {e}")
+
+print("Loading HPD complaints...")
+complaint_path = f"{GCS_BASE}/lake/full/hpd_complaints"
+try:
+    comp_avail_cols = get_available_columns(complaint_path)
+    date_cands = [
+        "receiveddate",
+        "received_date",
+        "dateentered",
+        "date_entered",
+        "complaintdate",
+        "complaint_date",
+        "statusdate",
+        "status_date",
+    ]
+    comp_dt_col = next((c for c in date_cands if c in comp_avail_cols), None)
+    status_col = next(
+        (c for c in comp_avail_cols if "status" in c.lower() and "date" not in c.lower()),
+        None,
+    )
+    desired_comp_cols = [
+        c
+        for c in [
+            "bbl",
+            "boroid",
+            "boro",
+            "block",
+            "lot",
+            "complaintid",
+            "complaint_id",
+        ]
+        if c in comp_avail_cols
+    ]
+    if status_col and status_col not in desired_comp_cols:
+        desired_comp_cols.append(status_col)
+    if comp_dt_col:
+        desired_comp_cols.append(comp_dt_col)
+
+    comp_cat_cols = [
+        c
+        for c in comp_avail_cols
+        if any(k in c.lower() for k in ["category", "type", "desc", "problem", "code"])
+        and c not in desired_comp_cols
+    ]
+    desired_comp_cols.extend(comp_cat_cols)
+
+    df_comp = pd.read_parquet(
+        complaint_path, storage_options=storage_options, columns=desired_comp_cols
+    )
+    df_comp.columns = [c.lower() for c in df_comp.columns]
+    df_comp["bbl_int"] = clean_bbl_to_int(df_comp)
+    df_comp = df_comp[df_comp["bbl_int"] > 0].copy()
+    if comp_dt_col:
+        df_comp["event_dt"] = pd.to_datetime(
+            df_comp[comp_dt_col.lower()], errors="coerce", utc=True
+        ).dt.tz_localize(None)
+        df_comp = df_comp[df_comp["event_dt"].notna()].copy()
+    else:
+        df_comp["event_dt"] = pd.NaT
+
+    if status_col:
+        st_clean = df_comp[status_col.lower()].fillna("").astype(str).str.strip().str.upper()
+        df_comp["is_open"] = st_clean.str.contains("OPEN|PENDING|ACTIVE|DISPATCH|QUEUED")
+    else:
+        df_comp["is_open"] = False
+
+    heat_mask = pd.Series(False, index=df_comp.index)
+    paint_mask = pd.Series(False, index=df_comp.index)
+    leak_mask = pd.Series(False, index=df_comp.index)
+    elec_mask = pd.Series(False, index=df_comp.index)
+    door_mask = pd.Series(False, index=df_comp.index)
+    for c in comp_cat_cols:
+        c_low = c.lower()
+        if c_low in df_comp.columns:
+            s_up = df_comp[c_low].astype(str).str.upper()
+            heat_mask = heat_mask | s_up.str.contains("HEAT|HOT WATER|HOT_WATER")
+            paint_mask = paint_mask | s_up.str.contains("PAINT|LEAD|PLASTER")
+            leak_mask = leak_mask | s_up.str.contains("LEAK|WATER|PLUMB|SEWAGE")
+            elec_mask = elec_mask | s_up.str.contains("ELECTRIC|WIRING|OUTLET|POWER|LIGHTING")
+            door_mask = door_mask | s_up.str.contains("DOOR|WINDOW|LOCK|FIRE ESCAPE|ENTRY")
+    df_comp["is_heat"] = heat_mask
+    df_comp["is_paint"] = paint_mask
+    df_comp["is_leak"] = leak_mask
+    df_comp["is_electric"] = elec_mask
+    df_comp["is_door_window"] = door_mask
+except Exception as e:
+    print(f"Notice loading complaints: {e}")
+    df_comp = pd.DataFrame(columns=["bbl_int", "event_dt", "is_heat", "is_paint", "is_leak", "is_electric", "is_door_window", "is_open"])
+
+# ---------------------------------------------------------
+# 5. COHORT FORMATION & TARGET DEFINITION
+# ---------------------------------------------------------
+print("Constructing training, validation, and test cohorts...")
+
+
+def get_pluto_release_df(target_release):
+    if version_col is not None and version_col in df_pluto.columns:
+        mask = (
+            df_pluto[version_col]
+            .astype(str)
+            .str.lower()
+            .str.contains(target_release.lower())
+        )
+        sub = df_pluto[mask].copy()
+    else:
+        sub = df_pluto.copy()
+    sub = sub[pd.to_numeric(sub["unitsres"], errors="coerce").fillna(0) >= 3]
+    return sub.drop_duplicates(subset=["bbl_int"])
+
+
+df_pluto_train_2020 = get_pluto_release_df("19v2")
+df_pluto_train_2021 = get_pluto_release_df("20v7")
+df_pluto_val = get_pluto_release_df("21v4")
+df_pluto_test = get_pluto_release_df("22v3")
+
+train_bbls_2020 = df_pluto_train_2020["bbl_int"].unique()
+train_bbls_2021 = df_pluto_train_2021["bbl_int"].unique()
+val_bbls = df_pluto_val["bbl_int"].unique()
+test_bbls = df_test["bbl_int"].values
+
+print(
+    f"Cohort Sizes -> Train 2020: {len(train_bbls_2020)}, Train 2021: {len(train_bbls_2021)}, "
+    f"Val (2022): {len(val_bbls)}, Test (2023): {len(test_bbls)}"
+)
+
+
+def get_forward_c_targets(start_dt, end_dt):
+    mask = (
+        (df_viol["class_clean"] == "C")
+        & (df_viol["insp_dt"] >= start_dt)
+        & (df_viol["insp_dt"] < end_dt)
+    )
+    counts = df_viol[mask].groupby("bbl_int").size()
+    pos_bbls = set(counts.index)
+    return pos_bbls, counts
+
+
+pos_train_2020, counts_train_2020 = get_forward_c_targets(
+    pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")
+)
+pos_train_2021, counts_train_2021 = get_forward_c_targets(
+    pd.Timestamp("2021-01-01"), pd.Timestamp("2022-01-01")
+)
+pos_val, counts_val = get_forward_c_targets(
+    pd.Timestamp("2022-01-01"), pd.Timestamp("2023-01-01")
+)
+
+
+# ---------------------------------------------------------
+# 6. FEATURE ENGINEERING PIPELINE
+# ---------------------------------------------------------
+def extract_features(bbl_array, cutoff_dt, pluto_release_df):
+    cohort_df = pd.DataFrame({"bbl_int": bbl_array})
+    cohort_df = cohort_df.merge(
+        pluto_release_df, on="bbl_int", how="left"
+    ).drop_duplicates(subset=["bbl_int"]).reset_index(drop=True)
+
+    # Morphological features
+    unitsres = pd.to_numeric(cohort_df["unitsres"], errors="coerce").fillna(3)
+    unitstot = pd.to_numeric(cohort_df["unitstotal"], errors="coerce").fillna(unitsres)
+    yearbuilt = (
+        pd.to_numeric(cohort_df["yearbuilt"], errors="coerce")
+        .fillna(1940)
+        .clip(1800, cutoff_dt.year)
+    )
+    bldgarea = (
+        pd.to_numeric(cohort_df["bldgarea"], errors="coerce").fillna(0).clip(lower=0)
+    )
+    resarea = (
+        pd.to_numeric(cohort_df["resarea"], errors="coerce").fillna(0).clip(lower=0)
+    )
+    lotarea = (
+        pd.to_numeric(cohort_df["lotarea"], errors="coerce").fillna(0).clip(lower=0)
+    )
+    numfloors = (
+        pd.to_numeric(cohort_df["numfloors"], errors="coerce").fillna(3).clip(1, 120)
+    )
+    assessland = (
+        pd.to_numeric(cohort_df["assessland"], errors="coerce").fillna(0).clip(lower=0)
+    )
+    assesstot = (
+        pd.to_numeric(cohort_df["assesstot"], errors="coerce").fillna(0).clip(lower=0)
+    )
+
+    feat = pd.DataFrame(index=cohort_df.index)
+    feat["bbl_int"] = cohort_df["bbl_int"]
+    feat["unitsres"] = unitsres
+    feat["unitstotal"] = unitstot
+    feat["res_unit_share"] = unitsres / (unitstot + 1e-4)
+    feat["building_age"] = (cutoff_dt.year - yearbuilt).clip(0, 160)
+    feat["is_prewar"] = (yearbuilt < 1940).astype(np.float32)
+    feat["is_midcentury"] = ((yearbuilt >= 1940) & (yearbuilt <= 1975)).astype(
+        np.float32
+    )
+    feat["numfloors"] = numfloors
+    feat["units_per_floor"] = unitsres / (numfloors + 1e-4)
+    feat["age_x_unitsres"] = (feat["building_age"] * np.log1p(feat["unitsres"])).astype(np.float32)
+    feat["age_x_floors"] = (feat["building_age"] * np.log1p(feat["numfloors"])).astype(np.float32)
+
+    # Physical Building Multiplicity metrics per tax lot from HPD Buildings
+    feat["hpd_bldg_count"] = feat["bbl_int"].map(bldg_count_map).fillna(1.0).astype(np.float32)
+    feat["hpd_max_stories"] = feat["bbl_int"].map(bldg_max_stories_map).fillna(feat["numfloors"]).astype(np.float32)
+    feat["hpd_mean_stories"] = feat["bbl_int"].map(bldg_mean_stories_map).fillna(feat["numfloors"]).astype(np.float32)
+    feat["is_multi_bldg_lot"] = (feat["hpd_bldg_count"] > 1.0).astype(np.float32)
+    feat["units_per_building"] = (feat["unitsres"] / np.maximum(feat["hpd_bldg_count"], 1.0)).astype(np.float32)
+    feat["bldgarea"] = bldgarea
+    feat["resarea"] = resarea
+    feat["lotarea"] = lotarea
+    feat["area_per_unit"] = resarea / (unitsres + 1e-4)
+    feat["lot_coverage"] = bldgarea / (lotarea * numfloors + 1e-4)
+    feat["assessed_val_per_unit"] = assesstot / (unitsres + 1e-4)
+    feat["land_val_ratio"] = assessland / (assesstot + 1e-4)
+    structure_val = (assesstot - assessland).clip(lower=0)
+    feat["structure_val_per_unit"] = (structure_val / (unitsres + 1e-4)).astype(np.float32)
+    feat["structure_val_ratio"] = (structure_val / (assesstot + 1e-4)).astype(np.float32)
+
+    alter_yr1 = pd.to_numeric(cohort_df["yearalter1"], errors="coerce").fillna(0) if "yearalter1" in cohort_df.columns else pd.Series(0, index=cohort_df.index)
+    alter_yr2 = pd.to_numeric(cohort_df["yearalter2"], errors="coerce").fillna(0) if "yearalter2" in cohort_df.columns else pd.Series(0, index=cohort_df.index)
+    alter_yr = np.maximum(alter_yr1, alter_yr2)
+    feat["is_altered"] = ((alter_yr >= 1800) & (alter_yr <= cutoff_dt.year)).astype(np.float32)
+    feat["years_since_alteration"] = np.where(
+        feat["is_altered"] == 1.0, (cutoff_dt.year - alter_yr).clip(0, 150), 999.0
+    ).astype(np.float32)
+
+    feat["borough"] = (
+        pd.to_numeric(cohort_df["borocode"], errors="coerce")
+        .fillna(cohort_df["bbl_int"] // 1_000_000_000)
+        .astype(int)
+    )
+    feat["cd"] = pd.to_numeric(cohort_df["cd"], errors="coerce").fillna(-1)
+
+    # Corporate entity classification and dimensional features from PLUTO
+    ownername_s = (
+        cohort_df["ownername"].fillna("").astype(str).str.upper()
+        if "ownername" in cohort_df.columns
+        else pd.Series("", index=cohort_df.index)
+    )
+    feat["is_corporate_owner"] = ownername_s.str.contains(
+        r"\b(LLC|INC|CORP|REALTY|HOLDINGS|PROPERTIES|MANAGEMENT|PARTNERS|LP|LTD|VENTURES)\b",
+        regex=True,
+    ).astype(np.float32)
+    feat["is_public_housing"] = ownername_s.str.contains(
+        r"NYCHA|HOUSING AUTHORITY|HPD|MUNICIPAL|CITY OF NEW YORK|CITY OF NY",
+        regex=True,
+    ).astype(np.float32)
+
+    bldgfront = (
+        pd.to_numeric(cohort_df["bldgfront"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        if "bldgfront" in cohort_df.columns
+        else pd.Series(0.0, index=cohort_df.index)
+    )
+    bldgdepth = (
+        pd.to_numeric(cohort_df["bldgdepth"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        if "bldgdepth" in cohort_df.columns
+        else pd.Series(0.0, index=cohort_df.index)
+    )
+    numbldgs = (
+        pd.to_numeric(cohort_df["numbldgs"], errors="coerce").fillna(1.0).clip(1.0, 100.0)
+        if "numbldgs" in cohort_df.columns
+        else pd.Series(1.0, index=cohort_df.index)
+    )
+    feat["bldgfront"] = bldgfront.astype(np.float32)
+    feat["bldgdepth"] = bldgdepth.astype(np.float32)
+    feat["numbldgs"] = numbldgs.astype(np.float32)
+    feat["bldg_footprint"] = (bldgfront * bldgdepth).astype(np.float32)
+    feat["bldg_aspect_ratio"] = (bldgdepth / (bldgfront + 1.0)).astype(np.float32)
+    feat["units_per_pluto_bldg"] = (feat["unitsres"] / numbldgs).astype(np.float32)
+
+    # PLUTO structural attributes: condo status, attached rowhouses, basement occupancy, FAR density
+    condono = (
+        pd.to_numeric(cohort_df["condono"], errors="coerce").fillna(0)
+        if "condono" in cohort_df.columns
+        else pd.Series(0, index=cohort_df.index)
+    )
+    feat["is_condo"] = (condono > 0).astype(np.float32)
+
+    proxcode = (
+        pd.to_numeric(cohort_df["proxcode"], errors="coerce").fillna(0)
+        if "proxcode" in cohort_df.columns
+        else pd.Series(0, index=cohort_df.index)
+    )
+    feat["proxcode"] = proxcode.astype(np.float32)
+    feat["is_attached_rowhouse"] = (proxcode == 3).astype(np.float32)
+    feat["is_detached"] = (proxcode == 1).astype(np.float32)
+
+    bsmtcode = (
+        pd.to_numeric(cohort_df["bsmtcode"], errors="coerce").fillna(0)
+        if "bsmtcode" in cohort_df.columns
+        else pd.Series(0, index=cohort_df.index)
+    )
+    feat["bsmtcode"] = bsmtcode.astype(np.float32)
+    feat["has_below_grade_bsmt"] = bsmtcode.isin([2, 4]).astype(np.float32)
+    feat["has_bsmt"] = bsmtcode.isin([1, 2, 3, 4]).astype(np.float32)
+
+    builtfar = (
+        pd.to_numeric(cohort_df["builtfar"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        if "builtfar" in cohort_df.columns
+        else pd.Series(0.0, index=cohort_df.index)
+    )
+    residfar = (
+        pd.to_numeric(cohort_df["residfar"], errors="coerce").fillna(0.0).clip(lower=0.0)
+        if "residfar" in cohort_df.columns
+        else pd.Series(0.0, index=cohort_df.index)
+    )
+    feat["builtfar"] = builtfar.astype(np.float32)
+    feat["residfar"] = residfar.astype(np.float32)
+    feat["far_density_ratio"] = (builtfar / (residfar + 0.01)).astype(np.float32)
+    feat["is_overbuilt_far"] = (builtfar > (residfar + 0.05)).astype(np.float32)
+
+    # Building typology representations
+    if "bldgclass" in cohort_df.columns:
+        bldgclass_str = (
+            cohort_df["bldgclass"].fillna("").astype(str).str.strip().str.upper()
+        )
+        prefix = bldgclass_str.str[0].fillna("")
+        archetype_map = {
+            "C": 1.0,
+            "D": 2.0,
+            "S": 3.0,
+            "A": 4.0,
+            "B": 5.0,
+            "R": 6.0,
+            "K": 7.0,
+            "O": 8.0,
+            "L": 9.0,
+            "H": 10.0,
+        }
+        feat["bldgclass_archetype"] = (
+            prefix.map(archetype_map).fillna(0).astype(np.float32)
+        )
+        feat["is_bldgclass_walkup"] = (prefix == "C").astype(np.float32)
+        feat["is_bldgclass_elevator"] = (prefix == "D").astype(np.float32)
+        feat["is_bldgclass_mixed"] = (prefix == "S").astype(np.float32)
+        bldg_counts = cohort_df["bldgclass"].astype(str).value_counts(normalize=True)
+        feat["bldgclass_freq"] = (
+            cohort_df["bldgclass"].astype(str).map(bldg_counts).fillna(0).astype(np.float32)
+        )
+        bldgclass_2c = bldgclass_str.str[:2]
+        bldgclass_2c_counts = bldgclass_2c.value_counts(normalize=True)
+        feat["bldgclass_2c_freq"] = bldgclass_2c.map(bldgclass_2c_counts).fillna(0).astype(np.float32)
+        feat["is_bldgclass_c1"] = (bldgclass_2c == "C1").astype(np.float32)
+        feat["is_bldgclass_c4"] = (bldgclass_2c == "C4").astype(np.float32)
+        feat["is_bldgclass_c7"] = (bldgclass_2c == "C7").astype(np.float32)
+        feat["is_bldgclass_d1"] = (bldgclass_2c == "D1").astype(np.float32)
+        feat["is_bldgclass_d4"] = (bldgclass_2c == "D4").astype(np.float32)
+        feat["is_bldgclass_s2"] = (bldgclass_2c == "S2").astype(np.float32)
+        feat["is_bldgclass_s9"] = (bldgclass_2c == "S9").astype(np.float32)
+    else:
+        feat["bldgclass_archetype"] = 0.0
+        feat["is_bldgclass_walkup"] = 0.0
+        feat["is_bldgclass_elevator"] = 0.0
+        feat["is_bldgclass_mixed"] = 0.0
+        feat["bldgclass_freq"] = 0.0
+        feat["bldgclass_2c_freq"] = 0.0
+        feat["is_bldgclass_c1"] = 0.0
+        feat["is_bldgclass_c4"] = 0.0
+        feat["is_bldgclass_c7"] = 0.0
+        feat["is_bldgclass_d1"] = 0.0
+        feat["is_bldgclass_d4"] = 0.0
+        feat["is_bldgclass_s2"] = 0.0
+        feat["is_bldgclass_s9"] = 0.0
+
+    if "landuse" in cohort_df.columns:
+        landuse_counts = cohort_df["landuse"].astype(str).value_counts(normalize=True)
+        feat["landuse_freq"] = (
+            cohort_df["landuse"].astype(str).map(landuse_counts).fillna(0).astype(np.float32)
+        )
+        feat["landuse_code"] = (
+            pd.to_numeric(cohort_df["landuse"], errors="coerce")
+            .fillna(0)
+            .clip(lower=0)
+            .astype(np.float32)
+        )
+    else:
+        feat["landuse_freq"] = 0.0
+        feat["landuse_code"] = 0.0
+
+    # Historical Violation Features (strictly insp_dt < cutoff_dt)
+    v_past = df_viol[df_viol["insp_dt"] < cutoff_dt]
+    dt_14d = cutoff_dt - pd.Timedelta(days=14)
+    dt_30d = cutoff_dt - pd.Timedelta(days=30)
+    dt_90d = cutoff_dt - pd.Timedelta(days=90)
+    dt_180d = cutoff_dt - pd.Timedelta(days=180)
+    dt_1y = cutoff_dt - pd.Timedelta(days=365)
+    dt_2y = cutoff_dt - pd.Timedelta(days=730)
+    dt_3y = cutoff_dt - pd.Timedelta(days=1095)
+    dt_4y = cutoff_dt - pd.Timedelta(days=1460)
+    dt_q4 = cutoff_dt - pd.Timedelta(days=92)
+
+    v_14d = v_past[v_past["insp_dt"] >= dt_14d]
+    v_30d = v_past[v_past["insp_dt"] >= dt_30d]
+    v_90d = v_past[v_past["insp_dt"] >= dt_90d]
+    v_180d = v_past[v_past["insp_dt"] >= dt_180d]
+    v_1y = v_past[v_past["insp_dt"] >= dt_1y]
+    v_2y = v_past[v_past["insp_dt"] >= dt_2y]
+    v_3y = v_past[v_past["insp_dt"] >= dt_3y]
+
+    def count_by_bbl(df_slice, filter_c=False, filter_b=False, filter_a=False):
+        if filter_c:
+            df_slice = df_slice[df_slice["class_clean"] == "C"]
+        elif filter_b:
+            df_slice = df_slice[df_slice["class_clean"] == "B"]
+        elif filter_a:
+            df_slice = df_slice[df_slice["class_clean"] == "A"]
+        return df_slice.groupby("bbl_int").size()
+
+    c_14d = count_by_bbl(v_14d, filter_c=True)
+    tot_14d = count_by_bbl(v_14d)
+
+    c_30d = count_by_bbl(v_30d, filter_c=True)
+    b_30d = count_by_bbl(v_30d, filter_b=True)
+    tot_30d = count_by_bbl(v_30d)
+
+    c_90d = count_by_bbl(v_90d, filter_c=True)
+    b_90d = count_by_bbl(v_90d, filter_b=True)
+    tot_90d = count_by_bbl(v_90d)
+
+    c_180d = count_by_bbl(v_180d, filter_c=True)
+    b_180d = count_by_bbl(v_180d, filter_b=True)
+    tot_180d = count_by_bbl(v_180d)
+
+    c_1y = count_by_bbl(v_1y, filter_c=True)
+    b_1y = count_by_bbl(v_1y, filter_b=True)
+    a_1y = count_by_bbl(v_1y, filter_a=True)
+    tot_1y = count_by_bbl(v_1y)
+
+    c_2y = count_by_bbl(v_2y, filter_c=True)
+    b_2y = count_by_bbl(v_2y, filter_b=True)
+    tot_2y = count_by_bbl(v_2y)
+
+    b_3y = count_by_bbl(v_3y, filter_b=True)
+    c_3y = count_by_bbl(v_3y, filter_c=True)
+    tot_3y = count_by_bbl(v_3y)
+
+    v_4y = v_past[v_past["insp_dt"] >= dt_4y]
+    c_4y = count_by_bbl(v_4y, filter_c=True)
+    b_4y = count_by_bbl(v_4y, filter_b=True)
+    tot_4y = count_by_bbl(v_4y)
+
+    # Distinct calendar years with Class C and B violations across multi-year lookbacks
+    v_4y_c = v_4y[v_4y["class_clean"] == "C"][["bbl_int", "insp_dt"]].copy()
+    v_4y_c["year"] = v_4y_c["insp_dt"].dt.year
+    recid_years_c = v_4y_c.drop_duplicates(subset=["bbl_int", "year"]).groupby("bbl_int").size()
+
+    v_4y_b = v_4y[v_4y["class_clean"] == "B"][["bbl_int", "insp_dt"]].copy()
+    v_4y_b["year"] = v_4y_b["insp_dt"].dt.year
+    recid_years_b = v_4y_b.drop_duplicates(subset=["bbl_int", "year"]).groupby("bbl_int").size()
+
+    # Statutory Q4 heat-season trajectory violations (Oct 1 to Dec 31 pre-cutoff)
+    v_q4 = v_past[v_past["insp_dt"] >= dt_q4]
+    c_q4 = count_by_bbl(v_q4, filter_c=True)
+    b_q4 = count_by_bbl(v_q4, filter_b=True)
+    tot_q4 = count_by_bbl(v_q4)
+
+    c_life = count_by_bbl(v_past, filter_c=True)
+    b_life = count_by_bbl(v_past, filter_b=True)
+    tot_life = count_by_bbl(v_past)
+
+    # Acute 60-day early-winter surge features (Nov 1 to Dec 31 pre-cutoff)
+    dt_winter_start = cutoff_dt - pd.Timedelta(days=61)
+    v_winter = v_past[v_past["insp_dt"] >= dt_winter_start]
+    c_winter = count_by_bbl(v_winter, filter_c=True)
+    b_winter = count_by_bbl(v_winter, filter_b=True)
+    tot_winter = count_by_bbl(v_winter)
+
+    # Open violation backlog features
+    v_past_open = v_past[v_past["status_clean"].str.contains("OPEN")]
+    c_open = count_by_bbl(v_past_open, filter_c=True)
+    b_open = count_by_bbl(v_past_open, filter_b=True)
+    tot_open = count_by_bbl(v_past_open)
+
+    feat["viol_c_14d"] = feat["bbl_int"].map(c_14d).fillna(0).astype(np.float32)
+    feat["viol_tot_14d"] = feat["bbl_int"].map(tot_14d).fillna(0).astype(np.float32)
+    feat["viol_c_14d_velocity"] = (
+        (feat["viol_c_14d"] * (365.0 / 14.0)) / (feat["bbl_int"].map(c_1y).fillna(0) + 1.0)
+    ).astype(np.float32)
+    feat["has_viol_c_14d"] = (feat["viol_c_14d"] > 0).astype(np.float32)
+
+    feat["viol_c_30d"] = feat["bbl_int"].map(c_30d).fillna(0)
+    feat["viol_b_30d"] = feat["bbl_int"].map(b_30d).fillna(0)
+    feat["viol_tot_30d"] = feat["bbl_int"].map(tot_30d).fillna(0)
+
+    feat["viol_c_90d"] = feat["bbl_int"].map(c_90d).fillna(0)
+    feat["viol_b_90d"] = feat["bbl_int"].map(b_90d).fillna(0)
+    feat["viol_tot_90d"] = feat["bbl_int"].map(tot_90d).fillna(0)
+
+    feat["viol_c_180d"] = feat["bbl_int"].map(c_180d).fillna(0)
+    feat["viol_b_180d"] = feat["bbl_int"].map(b_180d).fillna(0)
+    feat["viol_tot_180d"] = feat["bbl_int"].map(tot_180d).fillna(0)
+
+    feat["viol_c_1y"] = feat["bbl_int"].map(c_1y).fillna(0)
+    feat["viol_b_1y"] = feat["bbl_int"].map(b_1y).fillna(0)
+    feat["viol_a_1y"] = feat["bbl_int"].map(a_1y).fillna(0)
+    feat["viol_tot_1y"] = feat["bbl_int"].map(tot_1y).fillna(0)
+
+    feat["viol_c_2y"] = feat["bbl_int"].map(c_2y).fillna(0)
+    feat["viol_b_2y"] = feat["bbl_int"].map(b_2y).fillna(0)
+    feat["viol_tot_2y"] = feat["bbl_int"].map(tot_2y).fillna(0)
+
+    feat["viol_c_3y"] = feat["bbl_int"].map(c_3y).fillna(0)
+    feat["viol_b_3y"] = feat["bbl_int"].map(b_3y).fillna(0)
+    feat["viol_tot_3y"] = feat["bbl_int"].map(tot_3y).fillna(0)
+
+    feat["viol_c_4y"] = feat["bbl_int"].map(c_4y).fillna(0).astype(np.float32)
+    feat["viol_b_4y"] = feat["bbl_int"].map(b_4y).fillna(0).astype(np.float32)
+    feat["viol_tot_4y"] = feat["bbl_int"].map(tot_4y).fillna(0).astype(np.float32)
+
+    feat["chronic_recidivism_years_c"] = feat["bbl_int"].map(recid_years_c).fillna(0).astype(np.float32)
+    feat["chronic_recidivism_years_b"] = feat["bbl_int"].map(recid_years_b).fillna(0).astype(np.float32)
+    feat["is_multiyear_chronic_c"] = (feat["chronic_recidivism_years_c"] >= 2).astype(np.float32)
+    feat["is_persistent_chronic_c"] = (feat["chronic_recidivism_years_c"] >= 3).astype(np.float32)
+
+    # Discrete multi-year recidivism trajectory flags
+    feat["had_c_y1"] = (feat["viol_c_1y"] > 0).astype(np.float32)
+    feat["had_c_y2"] = ((feat["viol_c_2y"] - feat["viol_c_1y"]) > 0).astype(np.float32)
+    feat["had_c_y3"] = ((feat["viol_c_3y"] - feat["viol_c_2y"]) > 0).astype(np.float32)
+    feat["recid_chronic_consecutive"] = (
+        (feat["had_c_y1"] > 0) & (feat["had_c_y2"] > 0)
+    ).astype(np.float32)
+    feat["recid_relapse"] = (
+        (feat["had_c_y1"] > 0) & (feat["had_c_y2"] == 0) & (feat["had_c_y3"] > 0)
+    ).astype(np.float32)
+
+    feat["viol_c_q4"] = feat["bbl_int"].map(c_q4).fillna(0).astype(np.float32)
+    feat["viol_b_q4"] = feat["bbl_int"].map(b_q4).fillna(0).astype(np.float32)
+    feat["viol_tot_q4"] = feat["bbl_int"].map(tot_q4).fillna(0).astype(np.float32)
+
+    feat["viol_c_life"] = feat["bbl_int"].map(c_life).fillna(0)
+    feat["viol_b_life"] = feat["bbl_int"].map(b_life).fillna(0)
+    feat["viol_tot_life"] = feat["bbl_int"].map(tot_life).fillna(0)
+
+    # Inspection visit cadence and per-visit violation densities
+    v_1y_c = v_1y[v_1y["class_clean"] == "C"]
+    v_3y_c = v_3y[v_3y["class_clean"] == "C"]
+    insp_visits_c_1y = v_1y_c.groupby("bbl_int")["insp_dt"].nunique()
+    insp_visits_tot_1y = v_1y.groupby("bbl_int")["insp_dt"].nunique()
+    insp_visits_c_3y = v_3y_c.groupby("bbl_int")["insp_dt"].nunique()
+    insp_visits_tot_3y = v_3y.groupby("bbl_int")["insp_dt"].nunique()
+    insp_visits_tot_q4 = v_q4.groupby("bbl_int")["insp_dt"].nunique()
+
+    feat["insp_visits_c_1y"] = feat["bbl_int"].map(insp_visits_c_1y).fillna(0).astype(np.float32)
+    feat["insp_visits_tot_1y"] = feat["bbl_int"].map(insp_visits_tot_1y).fillna(0).astype(np.float32)
+    feat["insp_visits_c_3y"] = feat["bbl_int"].map(insp_visits_c_3y).fillna(0).astype(np.float32)
+    feat["insp_visits_tot_3y"] = feat["bbl_int"].map(insp_visits_tot_3y).fillna(0).astype(np.float32)
+    feat["insp_visits_tot_q4"] = feat["bbl_int"].map(insp_visits_tot_q4).fillna(0).astype(np.float32)
+    feat["viol_c_per_visit_1y"] = (
+        feat["viol_c_1y"] / np.maximum(feat["insp_visits_c_1y"], 1.0)
+    ).astype(np.float32)
+    feat["viol_tot_per_visit_1y"] = (
+        feat["viol_tot_1y"] / np.maximum(feat["insp_visits_tot_1y"], 1.0)
+    ).astype(np.float32)
+    feat["viol_c_failure_rate_1y"] = (
+        feat["insp_visits_c_1y"] / (feat["insp_visits_tot_1y"] + 1e-4)
+    ).astype(np.float32)
+
+    # Intra-year 180-day momentum (H1: older half [-365d, -180d), H2: recent half [-180d, 0d))
+    v_h1 = v_past[(v_past["insp_dt"] >= dt_1y) & (v_past["insp_dt"] < dt_180d)]
+    c_h1 = count_by_bbl(v_h1, filter_c=True)
+    c_h2 = c_180d
+    feat["viol_c_h1"] = feat["bbl_int"].map(c_h1).fillna(0).astype(np.float32)
+    feat["viol_c_h2"] = feat["bbl_int"].map(c_h2).fillna(0).astype(np.float32)
+    feat["viol_c_h2_to_h1_accel"] = (
+        feat["viol_c_h2"] / (feat["viol_c_h1"] + 1.0)
+    ).astype(np.float32)
+    feat["viol_c_q4_share"] = (feat["viol_c_q4"] / (feat["viol_c_1y"] + 1e-4)).astype(np.float32)
+
+    # 60-day winter surge metrics & velocities
+    feat["viol_c_winter_surge"] = feat["bbl_int"].map(c_winter).fillna(0).astype(np.float32)
+    feat["viol_b_winter_surge"] = feat["bbl_int"].map(b_winter).fillna(0).astype(np.float32)
+    feat["viol_tot_winter_surge"] = feat["bbl_int"].map(tot_winter).fillna(0).astype(np.float32)
+    feat["viol_c_winter_velocity"] = ((feat["viol_c_winter_surge"] * 6.0) / (feat["viol_c_1y"] + 1.0)).astype(np.float32)
+    feat["viol_tot_winter_velocity"] = ((feat["viol_tot_winter_surge"] * 6.0) / (feat["viol_tot_1y"] + 1.0)).astype(np.float32)
+    feat["has_winter_c_surge"] = (feat["viol_c_winter_surge"] > 0).astype(np.float32)
+
+    # Backlog counts and ratios
+    feat["viol_c_open_backlog"] = feat["bbl_int"].map(c_open).fillna(0).astype(np.float32)
+    feat["viol_b_open_backlog"] = feat["bbl_int"].map(b_open).fillna(0).astype(np.float32)
+    feat["viol_tot_open_backlog"] = feat["bbl_int"].map(tot_open).fillna(0).astype(np.float32)
+    feat["backlog_ratio_c"] = (feat["viol_c_open_backlog"] / (feat["viol_c_life"] + 1.0)).astype(np.float32)
+    feat["backlog_ratio_tot"] = (feat["viol_tot_open_backlog"] / (feat["viol_tot_life"] + 1.0)).astype(np.float32)
+    feat["backlog_b_to_c_ratio"] = (feat["viol_c_open_backlog"] / (feat["viol_b_open_backlog"] + 1.0)).astype(np.float32)
+    feat["viol_c_open_ratio"] = (feat["viol_c_open_backlog"] / (feat["viol_c_1y"] + 1.0)).astype(np.float32)
+    feat["viol_tot_open_ratio"] = (feat["viol_tot_open_backlog"] / (feat["viol_tot_1y"] + 1.0)).astype(np.float32)
+    feat["viol_c_accel_to_backlog"] = (feat["viol_c_90d"] / (feat["viol_c_open_backlog"] + 1.0)).astype(np.float32)
+    feat["chronic_backlog_pressure"] = (feat["viol_c_open_backlog"] / (feat["unitsres"] + 1.0)).astype(np.float32)
+    feat["chronic_backlog_x_recid"] = (feat["viol_c_open_backlog"] * feat["chronic_recidivism_years_c"]).astype(np.float32)
+
+    # Statutory rent-impairing violations & multi-unit diffusion & cure rates
+    v_1y_rent_c = v_1y[(v_1y["class_clean"] == "C") & (v_1y["is_rentimpairing"])]
+    v_past_rent_c = v_past[(v_past["class_clean"] == "C") & (v_past["is_rentimpairing"])]
+    c_rent_1y = count_by_bbl(v_1y_rent_c)
+    c_rent_life = count_by_bbl(v_past_rent_c)
+    feat["viol_c_rentimpairing_1y"] = feat["bbl_int"].map(c_rent_1y).fillna(0).astype(np.float32)
+    feat["viol_c_rentimpairing_life"] = feat["bbl_int"].map(c_rent_life).fillna(0).astype(np.float32)
+
+    v_1y_apt = v_1y[v_1y["apartment_clean"].str.len() > 0]
+    apt_dist_1y = v_1y_apt.groupby("bbl_int")["apartment_clean"].nunique()
+    feat["viol_distinct_apt_count_1y"] = feat["bbl_int"].map(apt_dist_1y).fillna(0).astype(np.float32)
+    feat["viol_apt_diffusion_ratio"] = (
+        feat["viol_distinct_apt_count_1y"] / (feat["unitsres"] + 1e-4)
+    ).astype(np.float32)
+
+    v_1y_c_apt = v_1y[(v_1y["class_clean"] == "C") & (v_1y["apartment_clean"].str.len() > 0)]
+    apt_c_dist_1y = v_1y_c_apt.groupby("bbl_int")["apartment_clean"].nunique()
+    feat["viol_c_distinct_apt_count_1y"] = feat["bbl_int"].map(apt_c_dist_1y).fillna(0).astype(np.float32)
+    feat["viol_c_apt_diffusion_ratio"] = (
+        feat["viol_c_distinct_apt_count_1y"] / (feat["unitsres"] + 1e-4)
+    ).astype(np.float32)
+    feat["is_multi_apt_c_diffusion"] = (feat["viol_c_distinct_apt_count_1y"] >= 2).astype(np.float32)
+    feat["viol_cure_rate"] = np.clip(
+        1.0 - (feat["viol_c_open_backlog"] / (feat["viol_c_life"] + 1.0)),
+        0.0,
+        1.0,
+    ).astype(np.float32)
+
+    # Statutory Hazard Classes (Lead, Heat, Window Guards, Mold/Leaks, Vermin)
+    v_1y_c = v_1y[v_1y["class_clean"] == "C"]
+    v_past_c = v_past[v_past["class_clean"] == "C"]
+
+    lead_c_1y = v_1y_c[v_1y_c["is_lead"]].groupby("bbl_int").size()
+    lead_c_life = v_past_c[v_past_c["is_lead"]].groupby("bbl_int").size()
+    heat_c_1y = v_1y_c[v_1y_c["is_heat"]].groupby("bbl_int").size()
+    heat_c_life = v_past_c[v_past_c["is_heat"]].groupby("bbl_int").size()
+    wguard_c_1y = v_1y_c[v_1y_c["is_windowguard"]].groupby("bbl_int").size()
+    wguard_c_life = v_past_c[v_past_c["is_windowguard"]].groupby("bbl_int").size()
+    mold_c_1y = v_1y_c[v_1y_c["is_mold_leak"]].groupby("bbl_int").size()
+    mold_c_life = v_past_c[v_past_c["is_mold_leak"]].groupby("bbl_int").size()
+    vermin_c_1y = v_1y_c[v_1y_c["is_vermin"]].groupby("bbl_int").size()
+    vermin_c_life = v_past_c[v_past_c["is_vermin"]].groupby("bbl_int").size()
+
+    feat["viol_c_lead_1y"] = feat["bbl_int"].map(lead_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_lead_life"] = feat["bbl_int"].map(lead_c_life).fillna(0).astype(np.float32)
+    feat["has_lead_viol_1y"] = (feat["viol_c_lead_1y"] > 0).astype(np.float32)
+
+    feat["viol_c_heat_1y"] = feat["bbl_int"].map(heat_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_heat_life"] = feat["bbl_int"].map(heat_c_life).fillna(0).astype(np.float32)
+    feat["has_heat_viol_1y"] = (feat["viol_c_heat_1y"] > 0).astype(np.float32)
+
+    feat["viol_c_wguard_1y"] = feat["bbl_int"].map(wguard_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_wguard_life"] = feat["bbl_int"].map(wguard_c_life).fillna(0).astype(np.float32)
+
+    feat["viol_c_mold_1y"] = feat["bbl_int"].map(mold_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_mold_life"] = feat["bbl_int"].map(mold_c_life).fillna(0).astype(np.float32)
+
+    feat["viol_c_vermin_1y"] = feat["bbl_int"].map(vermin_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_vermin_life"] = feat["bbl_int"].map(vermin_c_life).fillna(0).astype(np.float32)
+
+    # Statutory Fire Safety and Self-Closing Door Class C Violations
+    fire_c_1y = v_1y_c[v_1y_c["is_fire_safety"]].groupby("bbl_int").size()
+    fire_c_life = v_past_c[v_past_c["is_fire_safety"]].groupby("bbl_int").size()
+    feat["viol_c_fire_safety_1y"] = feat["bbl_int"].map(fire_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_fire_safety_life"] = feat["bbl_int"].map(fire_c_life).fillna(0).astype(np.float32)
+    feat["has_fire_safety_viol_1y"] = (feat["viol_c_fire_safety_1y"] > 0).astype(np.float32)
+
+    # Statutory Smoke/CO Alarms and Cooking Gas Shutoff Orders
+    alarm_c_1y = v_1y_c[v_1y_c["is_alarm"]].groupby("bbl_int").size()
+    alarm_c_life = v_past_c[v_past_c["is_alarm"]].groupby("bbl_int").size()
+    feat["viol_c_alarm_1y"] = feat["bbl_int"].map(alarm_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_alarm_life"] = feat["bbl_int"].map(alarm_c_life).fillna(0).astype(np.float32)
+    feat["has_alarm_viol_1y"] = (feat["viol_c_alarm_1y"] > 0).astype(np.float32)
+
+    gas_c_1y = v_1y_c[v_1y_c["is_gas"]].groupby("bbl_int").size()
+    gas_c_life = v_past_c[v_past_c["is_gas"]].groupby("bbl_int").size()
+    feat["viol_c_gas_1y"] = feat["bbl_int"].map(gas_c_1y).fillna(0).astype(np.float32)
+    feat["viol_c_gas_life"] = feat["bbl_int"].map(gas_c_life).fillna(0).astype(np.float32)
+    feat["has_gas_viol_1y"] = (feat["viol_c_gas_1y"] > 0).astype(np.float32)
+
+    # Common-area infrastructure hazards isolating boilers, roofs, hallways, and cellars
+    v_1y_c_common = v_1y_c[v_1y_c["is_common_area"]]
+    v_past_c_common = v_past_c[v_past_c["is_common_area"]]
+    feat["viol_c_common_area_1y"] = feat["bbl_int"].map(v_1y_c_common.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+    feat["viol_c_common_area_life"] = feat["bbl_int"].map(v_past_c_common.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+    feat["has_common_area_c_1y"] = (feat["viol_c_common_area_1y"] > 0).astype(np.float32)
+    feat["viol_c_common_area_share_1y"] = (feat["viol_c_common_area_1y"] / (feat["viol_c_1y"] + 1e-4)).astype(np.float32)
+
+    # Delinquent open violations past cure deadlines (> 30 days old and still open)
+    v_past_delinq = v_past_open[v_past_open["insp_dt"] < (cutoff_dt - pd.Timedelta(days=30))]
+    c_delinq = v_past_delinq[v_past_delinq["class_clean"] == "C"].groupby("bbl_int").size()
+    b_delinq = v_past_delinq[v_past_delinq["class_clean"] == "B"].groupby("bbl_int").size()
+    tot_delinq = v_past_delinq.groupby("bbl_int").size()
+    feat["viol_c_delinquent_backlog"] = feat["bbl_int"].map(c_delinq).fillna(0).astype(np.float32)
+    feat["viol_b_delinquent_backlog"] = feat["bbl_int"].map(b_delinq).fillna(0).astype(np.float32)
+    feat["viol_tot_delinquent_backlog"] = feat["bbl_int"].map(tot_delinq).fillna(0).astype(np.float32)
+    feat["delinquent_ratio_c"] = (feat["viol_c_delinquent_backlog"] / (feat["viol_c_life"] + 1.0)).astype(np.float32)
+    feat["delinquent_ratio_b"] = (feat["viol_b_delinquent_backlog"] / (feat["viol_b_life"] + 1.0)).astype(np.float32)
+    feat["delinquent_b_to_c_ratio"] = (feat["viol_c_delinquent_backlog"] / (feat["viol_b_delinquent_backlog"] + 1.0)).astype(np.float32)
+
+    # Historical Class C Violation Cure Duration Statistics from CurrentStatusDate
+    v_past_c_closed = v_past[
+        (v_past["class_clean"] == "C")
+        & (~v_past["status_clean"].str.contains("OPEN"))
+        & (v_past["status_dt"].notna())
+        & (v_past["status_dt"] < cutoff_dt)
+        & (v_past["status_dt"] >= v_past["insp_dt"])
+    ]
+    if len(v_past_c_closed) > 0:
+        v_past_c_closed = v_past_c_closed.copy()
+        v_past_c_closed["cure_days"] = (
+            (v_past_c_closed["status_dt"] - v_past_c_closed["insp_dt"]).dt.total_seconds() / 86400.0
+        ).clip(0, 3650)
+        avg_cure_c = v_past_c_closed.groupby("bbl_int")["cure_days"].mean()
+        max_cure_c = v_past_c_closed.groupby("bbl_int")["cure_days"].max()
+        feat["avg_cure_duration_c"] = feat["bbl_int"].map(avg_cure_c).fillna(0.0).astype(np.float32)
+        feat["max_cure_duration_c"] = feat["bbl_int"].map(max_cure_c).fillna(0.0).astype(np.float32)
+        feat["has_prolonged_cure_c"] = (feat["avg_cure_duration_c"] > 60.0).astype(np.float32)
+    else:
+        feat["avg_cure_duration_c"] = 0.0
+        feat["max_cure_duration_c"] = 0.0
+        feat["has_prolonged_cure_c"] = 0.0
+
+    # Statutory Delinquency Duration from originalcorrectbydate
+    if "correct_by_dt" in v_past_open.columns and v_past_open["correct_by_dt"].notna().any():
+        v_c_open = v_past_open[v_past_open["class_clean"] == "C"]
+        v_c_overdue = v_c_open[v_c_open["correct_by_dt"].notna() & (v_c_open["correct_by_dt"] < cutoff_dt)].copy()
+        c_overdue_cnt = v_c_overdue.groupby("bbl_int").size()
+        v_c_overdue["days_overdue"] = (
+            (cutoff_dt - v_c_overdue["correct_by_dt"]).dt.total_seconds() / 86400.0
+        ).clip(lower=0.0)
+        c_max_overdue = v_c_overdue.groupby("bbl_int")["days_overdue"].max()
+        feat["viol_c_delinquent_count"] = feat["bbl_int"].map(c_overdue_cnt).fillna(0).astype(np.float32)
+        feat["viol_c_max_days_overdue"] = feat["bbl_int"].map(c_max_overdue).fillna(0.0).clip(0, 3650).astype(np.float32)
+    else:
+        feat["viol_c_delinquent_count"] = 0.0
+        feat["viol_c_max_days_overdue"] = 0.0
+
+    # Defective certification flags
+    defect_1y = v_1y[v_1y["is_defective_cert"]].groupby("bbl_int").size()
+    defect_life = v_past[v_past["is_defective_cert"]].groupby("bbl_int").size()
+    feat["viol_defective_cert_1y"] = feat["bbl_int"].map(defect_1y).fillna(0).astype(np.float32)
+    feat["viol_defective_cert_life"] = feat["bbl_int"].map(defect_life).fillna(0).astype(np.float32)
+    feat["has_defective_cert"] = (feat["viol_defective_cert_life"] > 0).astype(np.float32)
+
+    # Hazard-aware cure ratios
+    feat["viol_c_cure_ratio"] = np.clip(
+        1.0 - (feat["viol_c_open_backlog"] / (feat["viol_c_life"] + 1e-4)), 0.0, 1.0
+    ).astype(np.float32)
+    feat["viol_tot_cure_ratio"] = np.clip(
+        1.0 - (feat["viol_tot_open_backlog"] / (feat["viol_tot_life"] + 1e-4)), 0.0, 1.0
+    ).astype(np.float32)
+
+    feat["viol_c_accel_30_90"] = ((feat["viol_c_30d"] * 3.0) / (feat["viol_c_90d"] + 1.0)).astype(np.float32)
+    feat["viol_c_accel_90_1y"] = ((feat["viol_c_90d"] * 4.0) / (feat["viol_c_1y"] + 1.0)).astype(np.float32)
+    feat["viol_tot_accel_30_90"] = ((feat["viol_tot_30d"] * 3.0) / (feat["viol_tot_90d"] + 1.0)).astype(np.float32)
+    feat["viol_tot_accel_90_1y"] = ((feat["viol_tot_90d"] * 4.0) / (feat["viol_tot_1y"] + 1.0)).astype(np.float32)
+    feat["viol_c_accel_30_180"] = (feat["viol_c_30d"] * 6.0) / (
+        feat["viol_c_180d"] + 1.0
+    )
+    feat["viol_tot_accel_30_180"] = (feat["viol_tot_30d"] * 6.0) / (
+        feat["viol_tot_180d"] + 1.0
+    )
+    feat["viol_b_accel_30_180"] = (feat["viol_b_30d"] * 6.0) / (
+        feat["viol_b_180d"] + 1.0
+    )
+
+    feat["viol_c_accel_1y_2y"] = feat["viol_c_1y"] / (
+        feat["viol_c_2y"] - feat["viol_c_1y"] + 1.0
+    )
+    feat["viol_c_net_accel_1y_2y"] = (
+        feat["viol_c_1y"] - (feat["viol_c_2y"] - feat["viol_c_1y"])
+    ).astype(np.float32)
+    feat["is_chronic_repeat"] = (
+        (feat["viol_c_1y"] > 0) & (feat["viol_c_2y"] > feat["viol_c_1y"])
+    ).astype(np.float32)
+    feat["viol_b_to_c_ratio"] = (
+        feat["viol_c_1y"] / (feat["viol_b_1y"] + 1.0)
+    ).astype(np.float32)
+    feat["b_to_c_escalation_1y"] = (
+        feat["viol_c_1y"] / (feat["viol_b_1y"] + 1.0)
+    ).astype(np.float32)
+    feat["b_to_c_escalation_3y"] = (
+        feat["viol_c_3y"] / (feat["viol_b_3y"] + 1.0)
+    ).astype(np.float32)
+    feat["b_to_c_escalation_90d"] = (
+        feat["viol_c_90d"] / (feat["viol_b_90d"] + 1.0)
+    ).astype(np.float32)
+    feat["b_to_c_escalation_q4"] = (
+        feat["viol_c_q4"] / (feat["viol_b_q4"] + 1.0)
+    ).astype(np.float32)
+    feat["viol_tot_accel_1y_2y"] = feat["viol_tot_1y"] / (
+        feat["viol_tot_2y"] - feat["viol_tot_1y"] + 1.0
+    )
+    feat["viol_c_share_1y"] = feat["viol_c_1y"] / (feat["viol_tot_1y"] + 1e-4)
+    feat["viol_c_share_life"] = feat["viol_c_life"] / (feat["viol_tot_life"] + 1e-4)
+    feat["has_viol_c_30d"] = (feat["viol_c_30d"] > 0).astype(np.float32)
+    feat["has_viol_c_90d"] = (feat["viol_c_90d"] > 0).astype(np.float32)
+    feat["has_viol_c_1y"] = (feat["viol_c_1y"] > 0).astype(np.float32)
+    feat["has_viol_c_2y"] = (feat["viol_c_2y"] > 0).astype(np.float32)
+    feat["viol_c_per_unit_1y"] = feat["viol_c_1y"] / (feat["unitsres"] + 1e-4)
+    feat["viol_tot_per_unit_1y"] = feat["viol_tot_1y"] / (feat["unitsres"] + 1e-4)
+
+    # Pre-cutoff Tenant Complaints
+    if len(df_comp) > 0 and df_comp["event_dt"].notna().any():
+        c_past = df_comp[df_comp["event_dt"] < cutoff_dt]
+        cp_14d = c_past[c_past["event_dt"] >= dt_14d]
+        cp_30d = c_past[c_past["event_dt"] >= dt_30d]
+        cp_90d = c_past[c_past["event_dt"] >= dt_90d]
+        cp_180d = c_past[c_past["event_dt"] >= dt_180d]
+        cp_1y = c_past[c_past["event_dt"] >= dt_1y]
+
+        comp_14d_cnt = cp_14d.groupby("bbl_int").size()
+        comp_30d_cnt = cp_30d.groupby("bbl_int").size()
+        comp_90d_cnt = cp_90d.groupby("bbl_int").size()
+        comp_180d_cnt = cp_180d.groupby("bbl_int").size()
+        comp_1y_cnt = cp_1y.groupby("bbl_int").size()
+        comp_life_cnt = c_past.groupby("bbl_int").size()
+
+        feat["comp_14d"] = feat["bbl_int"].map(comp_14d_cnt).fillna(0).astype(np.float32)
+        feat["comp_30d"] = feat["bbl_int"].map(comp_30d_cnt).fillna(0)
+        feat["comp_14d_velocity"] = (
+            (feat["comp_14d"] * (365.0 / 14.0)) / (feat["bbl_int"].map(comp_1y_cnt).fillna(0) + 1.0)
+        ).astype(np.float32)
+        feat["comp_90d"] = feat["bbl_int"].map(comp_90d_cnt).fillna(0)
+        feat["comp_180d"] = feat["bbl_int"].map(comp_180d_cnt).fillna(0)
+        feat["comp_1y"] = feat["bbl_int"].map(comp_1y_cnt).fillna(0)
+        feat["comp_life"] = feat["bbl_int"].map(comp_life_cnt).fillna(0)
+
+        # Complaint temporal calendar dispersion across distinct dates
+        cp_90d_dates = cp_90d.groupby("bbl_int")["event_dt"].nunique()
+        cp_180d_dates = cp_180d.groupby("bbl_int")["event_dt"].nunique()
+        feat["comp_distinct_dates_90d"] = feat["bbl_int"].map(cp_90d_dates).fillna(0).astype(np.float32)
+        feat["comp_distinct_dates_180d"] = feat["bbl_int"].map(cp_180d_dates).fillna(0).astype(np.float32)
+        feat["comp_temporal_dispersion_ratio"] = (
+            feat["comp_distinct_dates_90d"] / (feat["comp_90d"] + 1e-4)
+        ).astype(np.float32)
+
+        # Active open tenant complaint dispatch queues
+        if "is_open" in c_past.columns:
+            c_past_open = c_past[c_past["is_open"]]
+            comp_open_tot_s = c_past_open.groupby("bbl_int").size()
+            comp_open_30d_s = c_past_open[c_past_open["event_dt"] >= dt_30d].groupby("bbl_int").size()
+            feat["comp_open_tot"] = feat["bbl_int"].map(comp_open_tot_s).fillna(0).astype(np.float32)
+            feat["comp_open_30d"] = feat["bbl_int"].map(comp_open_30d_s).fillna(0).astype(np.float32)
+            feat["comp_open_ratio"] = (feat["comp_open_tot"] / (feat["comp_1y"] + 1.0)).astype(np.float32)
+        else:
+            feat["comp_open_tot"] = 0.0
+            feat["comp_open_30d"] = 0.0
+            feat["comp_open_ratio"] = 0.0
+
+        cp_q4 = c_past[c_past["event_dt"] >= dt_q4]
+        feat["comp_q4"] = feat["bbl_int"].map(cp_q4.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["comp_q4_share"] = (feat["comp_q4"] / (feat["comp_1y"] + 1e-4)).astype(np.float32)
+
+        cp_winter = c_past[c_past["event_dt"] >= dt_winter_start]
+        comp_winter_cnt = cp_winter.groupby("bbl_int").size()
+        feat["comp_winter_surge"] = feat["bbl_int"].map(comp_winter_cnt).fillna(0).astype(np.float32)
+        feat["comp_winter_velocity"] = ((feat["comp_winter_surge"] * 6.0) / (feat["comp_1y"] + 1.0)).astype(np.float32)
+
+        feat["comp_accel_30_180"] = (feat["comp_30d"] * 6.0) / (
+            feat["comp_180d"] + 1.0
+        )
+        feat["has_recent_comp"] = (feat["comp_90d"] > 0).astype(np.float32)
+        feat["comp_per_unit_1y"] = feat["comp_1y"] / (feat["unitsres"] + 1e-4)
+
+        max_dt_comp = c_past.groupby("bbl_int")["event_dt"].max()
+        days_since_comp = (cutoff_dt - feat["bbl_int"].map(max_dt_comp)).dt.days.fillna(9999)
+        feat["days_since_last_comp"] = days_since_comp.clip(0, 9999)
+        feat["recency_decay_comp"] = np.exp(-0.003 * feat["days_since_last_comp"])
+
+        # Heat and hot water emergency complaint aggregations
+        if "is_heat" in c_past.columns and c_past["is_heat"].any():
+            cp_heat = c_past[c_past["is_heat"]]
+            cp_heat_14d = cp_heat[cp_heat["event_dt"] >= dt_14d]
+            cp_heat_30d = cp_heat[cp_heat["event_dt"] >= dt_30d]
+            cp_heat_winter = cp_heat[cp_heat["event_dt"] >= dt_winter_start]
+            cp_heat_90d = cp_heat[cp_heat["event_dt"] >= dt_90d]
+            cp_heat_1y = cp_heat[cp_heat["event_dt"] >= dt_1y]
+
+            cp_heat_q4 = cp_heat[cp_heat["event_dt"] >= dt_q4]
+            feat["comp_heat_14d"] = feat["bbl_int"].map(cp_heat_14d.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["comp_heat_30d"] = feat["bbl_int"].map(cp_heat_30d.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["comp_heat_winter_surge"] = feat["bbl_int"].map(cp_heat_winter.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["comp_heat_q4"] = feat["bbl_int"].map(cp_heat_q4.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["comp_heat_q4_share"] = (feat["comp_heat_q4"] / (feat["comp_1y"] + 1e-4)).astype(np.float32)
+            feat["comp_heat_90d"] = feat["bbl_int"].map(cp_heat_90d.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["comp_heat_1y"] = feat["bbl_int"].map(cp_heat_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["comp_heat_share_1y"] = (feat["comp_heat_1y"] / (feat["comp_1y"] + 1e-4)).astype(np.float32)
+            feat["comp_heat_14d_velocity"] = (
+                (feat["comp_heat_14d"] * (365.0 / 14.0)) / (feat["comp_heat_1y"] + 1.0)
+            ).astype(np.float32)
+            feat["comp_heat_winter_velocity"] = ((feat["comp_heat_winter_surge"] * 6.0) / (feat["comp_heat_1y"] + 1.0)).astype(np.float32)
+            feat["has_winter_heat_comp"] = (feat["comp_heat_winter_surge"] > 0).astype(np.float32)
+            feat["comp_heat_winter_per_unit"] = (feat["comp_heat_winter_surge"] / (feat["unitsres"] + 1e-4)).astype(np.float32)
+            feat["comp_heat_q4_per_unit"] = (feat["comp_heat_q4"] / (feat["unitsres"] + 1e-4)).astype(np.float32)
+            feat["comp_heat_30d_per_unit"] = (feat["comp_heat_30d"] / (feat["unitsres"] + 1e-4)).astype(np.float32)
+        else:
+            feat["comp_heat_14d"] = 0.0
+            feat["comp_heat_14d_velocity"] = 0.0
+            feat["comp_heat_30d"] = 0.0
+            feat["comp_heat_winter_surge"] = 0.0
+            feat["comp_heat_winter_velocity"] = 0.0
+            feat["comp_heat_q4"] = 0.0
+            feat["comp_heat_q4_share"] = 0.0
+            feat["comp_heat_90d"] = 0.0
+            feat["comp_heat_1y"] = 0.0
+            feat["comp_heat_share_1y"] = 0.0
+            feat["has_winter_heat_comp"] = 0.0
+            feat["comp_heat_winter_per_unit"] = 0.0
+            feat["comp_heat_q4_per_unit"] = 0.0
+            feat["comp_heat_30d_per_unit"] = 0.0
+
+        if "is_paint" in c_past.columns and c_past["is_paint"].any():
+            cp_paint = c_past[c_past["is_paint"]]
+            cp_paint_1y = cp_paint[cp_paint["event_dt"] >= dt_1y]
+            feat["comp_paint_1y"] = feat["bbl_int"].map(cp_paint_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_paint_comp"] = (feat["comp_paint_1y"] > 0).astype(np.float32)
+        else:
+            feat["comp_paint_1y"] = 0.0
+            feat["has_paint_comp"] = 0.0
+
+        if "is_leak" in c_past.columns and c_past["is_leak"].any():
+            cp_leak = c_past[c_past["is_leak"]]
+            cp_leak_1y = cp_leak[cp_leak["event_dt"] >= dt_1y]
+            feat["comp_leak_1y"] = feat["bbl_int"].map(cp_leak_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_leak_comp"] = (feat["comp_leak_1y"] > 0).astype(np.float32)
+        else:
+            feat["comp_leak_1y"] = 0.0
+            feat["has_leak_comp"] = 0.0
+
+        if "is_electric" in c_past.columns and c_past["is_electric"].any():
+            cp_elec = c_past[c_past["is_electric"]]
+            cp_elec_1y = cp_elec[cp_elec["event_dt"] >= dt_1y]
+            feat["comp_electric_1y"] = feat["bbl_int"].map(cp_elec_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_electric_comp"] = (feat["comp_electric_1y"] > 0).astype(np.float32)
+        else:
+            feat["comp_electric_1y"] = 0.0
+            feat["has_electric_comp"] = 0.0
+
+        if "is_door_window" in c_past.columns and c_past["is_door_window"].any():
+            cp_door = c_past[c_past["is_door_window"]]
+            cp_door_1y = cp_door[cp_door["event_dt"] >= dt_1y]
+            feat["comp_door_window_1y"] = feat["bbl_int"].map(cp_door_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_door_window_comp"] = (feat["comp_door_window_1y"] > 0).astype(np.float32)
+        else:
+            feat["comp_door_window_1y"] = 0.0
+            feat["has_door_window_comp"] = 0.0
+
+        feat["unmet_inspection_pressure"] = (feat["comp_1y"] / (feat["insp_visits_tot_1y"] + 1.0)).astype(np.float32)
+    else:
+        feat["comp_14d"] = 0.0
+        feat["comp_14d_velocity"] = 0.0
+        feat["comp_30d"] = 0.0
+        feat["comp_90d"] = 0.0
+        feat["comp_180d"] = 0.0
+        feat["comp_1y"] = 0.0
+        feat["comp_life"] = 0.0
+        feat["comp_distinct_dates_90d"] = 0.0
+        feat["comp_distinct_dates_180d"] = 0.0
+        feat["comp_temporal_dispersion_ratio"] = 0.0
+        feat["comp_electric_1y"] = 0.0
+        feat["has_electric_comp"] = 0.0
+        feat["comp_door_window_1y"] = 0.0
+        feat["has_door_window_comp"] = 0.0
+        feat["comp_q4"] = 0.0
+        feat["comp_q4_share"] = 0.0
+        feat["comp_winter_surge"] = 0.0
+        feat["comp_winter_velocity"] = 0.0
+        feat["comp_accel_30_180"] = 0.0
+        feat["has_recent_comp"] = 0.0
+        feat["comp_per_unit_1y"] = 0.0
+        feat["days_since_last_comp"] = 9999.0
+        feat["recency_decay_comp"] = 0.0
+        feat["comp_heat_14d"] = 0.0
+        feat["comp_heat_14d_velocity"] = 0.0
+        feat["comp_heat_30d"] = 0.0
+        feat["comp_heat_winter_surge"] = 0.0
+        feat["comp_heat_q4"] = 0.0
+        feat["comp_heat_q4_share"] = 0.0
+        feat["comp_heat_90d"] = 0.0
+        feat["comp_heat_1y"] = 0.0
+        feat["comp_heat_share_1y"] = 0.0
+        feat["comp_heat_winter_velocity"] = 0.0
+        feat["has_winter_heat_comp"] = 0.0
+        feat["comp_paint_1y"] = 0.0
+        feat["has_paint_comp"] = 0.0
+        feat["comp_leak_1y"] = 0.0
+        feat["has_leak_comp"] = 0.0
+        feat["unmet_inspection_pressure"] = 0.0
+        feat["comp_open_tot"] = 0.0
+        feat["comp_open_30d"] = 0.0
+        feat["comp_open_ratio"] = 0.0
+
+    # Complaint-to-violation conversion and uninspected complaint deficit metrics
+    feat["viol_c_to_comp_ratio"] = (feat["viol_c_1y"] / (feat["comp_1y"] + 1.0)).astype(np.float32)
+    feat["viol_tot_to_comp_ratio"] = (feat["viol_tot_1y"] / (feat["comp_1y"] + 1.0)).astype(np.float32)
+    feat["uninspected_comp_deficit"] = np.maximum(feat["comp_1y"] - feat["insp_visits_tot_1y"], 0.0).astype(np.float32)
+    feat["uninspected_comp_deficit_ratio"] = (feat["uninspected_comp_deficit"] / (feat["comp_1y"] + 1.0)).astype(np.float32)
+    feat["comp_q4_uninspected_deficit"] = np.maximum(feat["comp_q4"] - feat["insp_visits_tot_q4"], 0.0).astype(np.float32)
+    feat["comp_q4_uninspected_ratio"] = (feat["comp_q4_uninspected_deficit"] / (feat["comp_q4"] + 1.0)).astype(np.float32)
+
+    # Building physical density normalizations per 1,000 gross square feet
+    bldgarea_k = np.maximum(feat["bldgarea"] / 1000.0, 0.1)
+    feat["viol_c_per_1k_sqft_1y"] = (feat["viol_c_1y"] / bldgarea_k).astype(np.float32)
+    feat["viol_tot_per_1k_sqft_1y"] = (feat["viol_tot_1y"] / bldgarea_k).astype(np.float32)
+    feat["comp_per_1k_sqft_1y"] = (feat["comp_1y"] / bldgarea_k).astype(np.float32)
+    feat["viol_c_open_backlog_per_1k_sqft"] = (feat["viol_c_open_backlog"] / bldgarea_k).astype(np.float32)
+
+    # Micro-spatial Tax Block Leave-One-Out Risk Aggregations
+    block_id = cohort_df["bbl_int"] // 10000
+    block_viol_sum = feat.groupby(block_id)["viol_c_1y"].transform("sum")
+    block_cnt = feat.groupby(block_id)["viol_c_1y"].transform("count")
+    feat["block_viol_c_density"] = (
+        (block_viol_sum - feat["viol_c_1y"]) / np.maximum(block_cnt - 1.0, 1.0)
+    ).fillna(0.0).astype(np.float32)
+
+    block_comp_sum = feat.groupby(block_id)["comp_1y"].transform("sum")
+    feat["block_comp_density"] = (
+        (block_comp_sum - feat["comp_1y"]) / np.maximum(block_cnt - 1.0, 1.0)
+    ).fillna(0.0).astype(np.float32)
+
+    block_backlog_sum = feat.groupby(block_id)["viol_c_open_backlog"].transform("sum")
+    feat["block_c_backlog_density"] = (
+        (block_backlog_sum - feat["viol_c_open_backlog"]) / np.maximum(block_cnt - 1.0, 1.0)
+    ).fillna(0.0).astype(np.float32)
+
+    # Micro-spatial relative deviations from tax block peer baselines
+    feat["block_viol_c_deviation"] = (feat["viol_c_1y"] - feat["block_viol_c_density"]).astype(np.float32)
+    feat["block_viol_c_ratio"] = (feat["viol_c_1y"] / (feat["block_viol_c_density"] + 1.0)).astype(np.float32)
+    feat["block_comp_deviation"] = (feat["comp_1y"] - feat["block_comp_density"]).astype(np.float32)
+    feat["block_c_backlog_deviation"] = (feat["viol_c_open_backlog"] - feat["block_c_backlog_density"]).astype(np.float32)
+
+    # Census Tract Micro-Spatial Leave-One-Out Risk Aggregations
+    tract_col = "tract2010" if "tract2010" in cohort_df.columns else ("ct2010" if "ct2010" in cohort_df.columns else None)
+    if tract_col is not None:
+        tract_id = cohort_df["borough"].astype(str) + "_" + cohort_df[tract_col].fillna(-1).astype(str)
+        tract_viol_sum = feat.groupby(tract_id)["viol_c_1y"].transform("sum")
+        tract_cnt = feat.groupby(tract_id)["viol_c_1y"].transform("count")
+        feat["tract_viol_c_density"] = (
+            (tract_viol_sum - feat["viol_c_1y"]) / np.maximum(tract_cnt - 1.0, 1.0)
+        ).fillna(0.0).astype(np.float32)
+
+        tract_comp_sum = feat.groupby(tract_id)["comp_1y"].transform("sum")
+        feat["tract_comp_density"] = (
+            (tract_comp_sum - feat["comp_1y"]) / np.maximum(tract_cnt - 1.0, 1.0)
+        ).fillna(0.0).astype(np.float32)
+    else:
+        feat["tract_viol_c_density"] = 0.0
+        feat["tract_comp_density"] = 0.0
+
+    # Micro-spatial census tract deviations and ratios
+    feat["tract_viol_c_deviation"] = (feat["viol_c_1y"] - feat["tract_viol_c_density"]).astype(np.float32)
+    feat["tract_comp_deviation"] = (feat["comp_1y"] - feat["tract_comp_density"]).astype(np.float32)
+    feat["tract_viol_c_ratio"] = (feat["viol_c_1y"] / (feat["tract_viol_c_density"] + 1.0)).astype(np.float32)
+
+    # Recency features
+    max_dt_all = v_past.groupby("bbl_int")["insp_dt"].max()
+    max_dt_c = v_past[v_past["class_clean"] == "C"].groupby("bbl_int")["insp_dt"].max()
+
+    days_since_viol = (cutoff_dt - feat["bbl_int"].map(max_dt_all)).dt.days.fillna(9999)
+    days_since_c = (cutoff_dt - feat["bbl_int"].map(max_dt_c)).dt.days.fillna(9999)
+    feat["days_since_last_viol"] = days_since_viol.clip(0, 9999)
+    feat["days_since_last_c"] = days_since_c.clip(0, 9999)
+    feat["recency_decay_c"] = np.exp(-0.003 * feat["days_since_last_c"])
+
+    v_c_past = v_past[v_past["class_clean"] == "C"]
+    if len(v_c_past) > 0:
+        v_c_dates = v_c_past[["bbl_int", "insp_dt"]].drop_duplicates().sort_values(["bbl_int", "insp_dt"], ascending=[True, False])
+        v_c_top2 = v_c_dates.groupby("bbl_int").head(2).copy()
+        v_c_top2["rnk"] = v_c_top2.groupby("bbl_int").cumcount()
+        c_last = v_c_top2[v_c_top2["rnk"] == 0].set_index("bbl_int")["insp_dt"]
+        c_prev = v_c_top2[v_c_top2["rnk"] == 1].set_index("bbl_int")["insp_dt"]
+        c_tempo_days = (c_last - c_prev).dt.total_seconds() / 86400.0
+        feat["viol_c_recurrence_tempo"] = feat["bbl_int"].map(c_tempo_days).fillna(9999.0).clip(0, 9999).astype(np.float32)
+    else:
+        feat["viol_c_recurrence_tempo"] = 9999.0
+    feat["has_rapid_c_tempo"] = (feat["viol_c_recurrence_tempo"] <= 60.0).astype(np.float32)
+
+    # Auxiliary Distress Signals
+    if len(df_lit) > 0:
+        lit_past = df_lit[
+            (df_lit["event_dt"].isna()) | (df_lit["event_dt"] < cutoff_dt)
+        ]
+        lit_2y = lit_past[lit_past["event_dt"].isna() | (lit_past["event_dt"] >= dt_2y)]
+        lit_1y = lit_past[(lit_past["event_dt"].notna()) & (lit_past["event_dt"] < cutoff_dt) & (lit_past["event_dt"] >= dt_1y)]
+        lit_180d = lit_past[(lit_past["event_dt"].notna()) & (lit_past["event_dt"] < cutoff_dt) & (lit_past["event_dt"] >= dt_180d)]
+
+        feat["lit_count_life"] = (
+            feat["bbl_int"].map(lit_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+        feat["lit_count_2y"] = (
+            feat["bbl_int"].map(lit_2y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+        feat["lit_count_1y"] = (
+            feat["bbl_int"].map(lit_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+        feat["lit_count_180d"] = (
+            feat["bbl_int"].map(lit_180d.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+
+        # Granular HPD litigation dimensions: active open cases, tenant HP actions, civil penalties
+        if "is_open_lit" in lit_past.columns:
+            lit_open = lit_past[lit_past["is_open_lit"]]
+            feat["lit_open_cases"] = feat["bbl_int"].map(lit_open.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_open_litigation"] = (feat["lit_open_cases"] > 0).astype(np.float32)
+        else:
+            feat["lit_open_cases"] = feat["lit_count_1y"]
+            feat["has_open_litigation"] = (feat["lit_open_cases"] > 0).astype(np.float32)
+
+        if "is_hp_action" in lit_past.columns:
+            lit_hp_1y = lit_1y[lit_1y["is_hp_action"]]
+            lit_hp_life = lit_past[lit_past["is_hp_action"]]
+            feat["lit_hp_actions_1y"] = feat["bbl_int"].map(lit_hp_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["lit_hp_actions_life"] = feat["bbl_int"].map(lit_hp_life.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_hp_action"] = (feat["lit_hp_actions_life"] > 0).astype(np.float32)
+        else:
+            feat["lit_hp_actions_1y"] = 0.0
+            feat["lit_hp_actions_life"] = 0.0
+            feat["has_hp_action"] = 0.0
+
+        if "is_comprehensive" in lit_past.columns:
+            lit_comp_past = lit_past[lit_past["is_comprehensive"]]
+            lit_comp_1y = lit_1y[lit_1y["is_comprehensive"]]
+            feat["lit_comprehensive_1y"] = feat["bbl_int"].map(lit_comp_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["lit_comprehensive_life"] = feat["bbl_int"].map(lit_comp_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_comprehensive_lit"] = (feat["lit_comprehensive_life"] > 0).astype(np.float32)
+        else:
+            feat["lit_comprehensive_1y"] = 0.0
+            feat["lit_comprehensive_life"] = 0.0
+            feat["has_comprehensive_lit"] = 0.0
+
+        if "is_access" in lit_past.columns:
+            lit_acc_past = lit_past[lit_past["is_access"]]
+            lit_acc_1y = lit_1y[lit_1y["is_access"]]
+            feat["lit_access_1y"] = feat["bbl_int"].map(lit_acc_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["lit_access_life"] = feat["bbl_int"].map(lit_acc_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_access_lit"] = (feat["lit_access_life"] > 0).astype(np.float32)
+        else:
+            feat["lit_access_1y"] = 0.0
+            feat["lit_access_life"] = 0.0
+            feat["has_access_lit"] = 0.0
+
+        feat["lit_penalties_amount_life"] = feat["bbl_int"].map(lit_past.groupby("bbl_int")["amount"].sum()).fillna(0.0).astype(np.float32)
+        feat["lit_penalties_amount_1y"] = feat["bbl_int"].map(lit_1y.groupby("bbl_int")["amount"].sum()).fillna(0.0).astype(np.float32)
+        feat["has_lit_penalties"] = (feat["lit_penalties_amount_life"] > 0).astype(np.float32)
+    else:
+        feat["lit_count_life"] = 0.0
+        feat["lit_count_2y"] = 0.0
+        feat["lit_count_1y"] = 0.0
+        feat["lit_count_180d"] = 0.0
+        feat["lit_open_cases"] = 0.0
+        feat["has_open_litigation"] = 0.0
+        feat["lit_hp_actions_1y"] = 0.0
+        feat["lit_hp_actions_life"] = 0.0
+        feat["has_hp_action"] = 0.0
+        feat["lit_comprehensive_1y"] = 0.0
+        feat["lit_comprehensive_life"] = 0.0
+        feat["has_comprehensive_lit"] = 0.0
+        feat["lit_access_1y"] = 0.0
+        feat["lit_access_life"] = 0.0
+        feat["has_access_lit"] = 0.0
+        feat["lit_penalties_amount_life"] = 0.0
+        feat["lit_penalties_amount_1y"] = 0.0
+        feat["has_lit_penalties"] = 0.0
+    feat["has_litigation"] = (feat["lit_count_life"] > 0).astype(np.float32)
+    feat["has_litigation_1y"] = (feat["lit_count_1y"] > 0).astype(np.float32)
+    feat["has_litigation_180d"] = (feat["lit_count_180d"] > 0).astype(np.float32)
+    feat["has_active_litigation"] = ((feat["lit_count_1y"] > 0) | (feat["lit_count_180d"] > 0)).astype(np.float32)
+
+    feat["has_vacate_order"] = (
+        feat["bbl_int"].isin(set(df_vacate["bbl_int"])).astype(np.float32)
+    )
+    feat["is_aep_building"] = (
+        feat["bbl_int"].isin(set(df_aep["bbl_int"])).astype(np.float32)
+    )
+    feat["is_conh_building"] = (
+        feat["bbl_int"].isin(set(df_conh["bbl_int"])).astype(np.float32)
+    )
+
+    if len(df_hwo) > 0:
+        hwo_past = df_hwo[
+            (df_hwo["event_dt"].isna()) | (df_hwo["event_dt"] < cutoff_dt)
+        ]
+        hwo_1y = df_hwo[
+            (df_hwo["event_dt"].notna()) & (df_hwo["event_dt"] < cutoff_dt) & (df_hwo["event_dt"] >= dt_1y)
+        ]
+        hwo_3y = df_hwo[
+            (df_hwo["event_dt"].notna()) & (df_hwo["event_dt"] < cutoff_dt) & (df_hwo["event_dt"] >= dt_3y)
+        ]
+        feat["hwo_count"] = feat["bbl_int"].map(hwo_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["hwo_count_1y"] = feat["bbl_int"].map(hwo_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["hwo_count_3y"] = feat["bbl_int"].map(hwo_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["hwo_amount_life"] = feat["bbl_int"].map(hwo_past.groupby("bbl_int")["amount"].sum()).fillna(0.0).astype(np.float32)
+        feat["hwo_amount_1y"] = feat["bbl_int"].map(hwo_1y.groupby("bbl_int")["amount"].sum()).fillna(0.0).astype(np.float32)
+        feat["has_hwo_1y"] = (feat["hwo_count_1y"] > 0).astype(np.float32)
+        feat["has_hwo"] = (feat["hwo_count"] > 0).astype(np.float32)
+    else:
+        feat["hwo_count"] = 0.0
+        feat["hwo_count_1y"] = 0.0
+        feat["hwo_count_3y"] = 0.0
+        feat["hwo_amount_life"] = 0.0
+        feat["hwo_amount_1y"] = 0.0
+        feat["has_hwo_1y"] = 0.0
+        feat["has_hwo"] = 0.0
+
+    if len(df_evict) > 0:
+        evict_past = df_evict[
+            (df_evict["event_dt"].isna()) | (df_evict["event_dt"] < cutoff_dt)
+        ]
+        evict_1y = df_evict[
+            (df_evict["event_dt"].notna()) & (df_evict["event_dt"] < cutoff_dt) & (df_evict["event_dt"] >= dt_1y)
+        ]
+        evict_3y = df_evict[
+            (df_evict["event_dt"].notna()) & (df_evict["event_dt"] < cutoff_dt) & (df_evict["event_dt"] >= dt_3y)
+        ]
+        feat["eviction_count"] = (
+            feat["bbl_int"].map(evict_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+        feat["eviction_count_1y"] = (
+            feat["bbl_int"].map(evict_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+        feat["eviction_count_3y"] = (
+            feat["bbl_int"].map(evict_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        )
+        feat["has_eviction_1y"] = (feat["eviction_count_1y"] > 0).astype(np.float32)
+        feat["has_eviction_3y"] = (feat["eviction_count_3y"] > 0).astype(np.float32)
+    else:
+        feat["eviction_count"] = 0.0
+        feat["eviction_count_1y"] = 0.0
+        feat["eviction_count_3y"] = 0.0
+        feat["has_eviction_1y"] = 0.0
+        feat["has_eviction_3y"] = 0.0
+
+    # DOB Violations
+    if len(df_dob) > 0:
+        dob_past = df_dob[(df_dob["event_dt"].isna()) | (df_dob["event_dt"] < cutoff_dt)]
+        dob_1y = df_dob[(df_dob["event_dt"].notna()) & (df_dob["event_dt"] < cutoff_dt) & (df_dob["event_dt"] >= dt_1y)]
+        dob_3y = df_dob[(df_dob["event_dt"].notna()) & (df_dob["event_dt"] < cutoff_dt) & (df_dob["event_dt"] >= dt_3y)]
+        feat["dob_viol_1y"] = feat["bbl_int"].map(dob_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["dob_viol_3y"] = feat["bbl_int"].map(dob_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["dob_viol_life"] = feat["bbl_int"].map(dob_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+    else:
+        feat["dob_viol_1y"] = 0.0
+        feat["dob_viol_3y"] = 0.0
+        feat["dob_viol_life"] = 0.0
+
+    # DOB ECB Violations & Class 1 Immediately Hazardous & Unpaid Penalty Balances
+    if len(df_dob_ecb) > 0:
+        ecb_past = df_dob_ecb[(df_dob_ecb["event_dt"].isna()) | (df_dob_ecb["event_dt"] < cutoff_dt)]
+        ecb_1y = df_dob_ecb[(df_dob_ecb["event_dt"].notna()) & (df_dob_ecb["event_dt"] < cutoff_dt) & (df_dob_ecb["event_dt"] >= dt_1y)]
+        ecb_3y = df_dob_ecb[(df_dob_ecb["event_dt"].notna()) & (df_dob_ecb["event_dt"] < cutoff_dt) & (df_dob_ecb["event_dt"] >= dt_3y)]
+        feat["dob_ecb_viol_1y"] = feat["bbl_int"].map(ecb_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["dob_ecb_viol_3y"] = feat["bbl_int"].map(ecb_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["dob_ecb_viol_life"] = feat["bbl_int"].map(ecb_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+
+        if "is_class1" in df_dob_ecb.columns:
+            ecb_c1_past = ecb_past[ecb_past["is_class1"]]
+            ecb_c1_1y = ecb_1y[ecb_1y["is_class1"]]
+            feat["dob_ecb_class1_1y"] = feat["bbl_int"].map(ecb_c1_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["dob_ecb_class1_life"] = feat["bbl_int"].map(ecb_c1_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_dob_ecb_class1_1y"] = (feat["dob_ecb_class1_1y"] > 0).astype(np.float32)
+            feat["has_dob_ecb_class1_life"] = (feat["dob_ecb_class1_life"] > 0).astype(np.float32)
+        else:
+            feat["dob_ecb_class1_1y"] = 0.0
+            feat["dob_ecb_class1_life"] = 0.0
+            feat["has_dob_ecb_class1_1y"] = 0.0
+            feat["has_dob_ecb_class1_life"] = 0.0
+
+        bal_source = "balance_due" if "balance_due" in df_dob_ecb.columns else "amount"
+        feat["dob_ecb_penalty_balance"] = feat["bbl_int"].map(ecb_past.groupby("bbl_int")[bal_source].sum()).fillna(0.0).astype(np.float32)
+        feat["has_dob_ecb_penalty_balance"] = (feat["dob_ecb_penalty_balance"] > 0.0).astype(np.float32)
+    else:
+        feat["dob_ecb_viol_1y"] = 0.0
+        feat["dob_ecb_viol_3y"] = 0.0
+        feat["dob_ecb_viol_life"] = 0.0
+        feat["dob_ecb_class1_1y"] = 0.0
+        feat["dob_ecb_class1_life"] = 0.0
+        feat["has_dob_ecb_class1_1y"] = 0.0
+        feat["has_dob_ecb_class1_life"] = 0.0
+        feat["dob_ecb_penalty_balance"] = 0.0
+        feat["has_dob_ecb_penalty_balance"] = 0.0
+
+    # DOHMH Rodent Inspections
+    if len(df_rodent_fail) > 0:
+        rod_past = df_rodent_fail[(df_rodent_fail["event_dt"].isna()) | (df_rodent_fail["event_dt"] < cutoff_dt)]
+        rod_1y = df_rodent_fail[(df_rodent_fail["event_dt"].notna()) & (df_rodent_fail["event_dt"] < cutoff_dt) & (df_rodent_fail["event_dt"] >= dt_1y)]
+        rod_3y = df_rodent_fail[(df_rodent_fail["event_dt"].notna()) & (df_rodent_fail["event_dt"] < cutoff_dt) & (df_rodent_fail["event_dt"] >= dt_3y)]
+        feat["rodent_fail_1y"] = feat["bbl_int"].map(rod_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["rodent_fail_3y"] = feat["bbl_int"].map(rod_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["rodent_fail_life"] = feat["bbl_int"].map(rod_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+    else:
+        feat["rodent_fail_1y"] = 0.0
+        feat["rodent_fail_3y"] = 0.0
+        feat["rodent_fail_life"] = 0.0
+
+    # DOB Safety Violations (Boiler & Elevator life-safety mandates)
+    if len(df_dob_safety) > 0:
+        safety_past = df_dob_safety[(df_dob_safety["event_dt"].isna()) | (df_dob_safety["event_dt"] < cutoff_dt)]
+        safety_1y = df_dob_safety[(df_dob_safety["event_dt"].notna()) & (df_dob_safety["event_dt"] < cutoff_dt) & (df_dob_safety["event_dt"] >= dt_1y)]
+        safety_3y = df_dob_safety[(df_dob_safety["event_dt"].notna()) & (df_dob_safety["event_dt"] < cutoff_dt) & (df_dob_safety["event_dt"] >= dt_3y)]
+        feat["dob_safety_viol_1y"] = feat["bbl_int"].map(safety_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["dob_safety_viol_3y"] = feat["bbl_int"].map(safety_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["dob_safety_viol_life"] = feat["bbl_int"].map(safety_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+
+        if "is_boiler" in df_dob_safety.columns:
+            safety_blr_past = safety_past[safety_past["is_boiler"]]
+            safety_blr_1y = safety_1y[safety_1y["is_boiler"]]
+            feat["dob_safety_boiler_1y"] = feat["bbl_int"].map(safety_blr_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["dob_safety_boiler_life"] = feat["bbl_int"].map(safety_blr_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_boiler_safety_viol"] = (feat["dob_safety_boiler_life"] > 0).astype(np.float32)
+        else:
+            feat["dob_safety_boiler_1y"] = 0.0
+            feat["dob_safety_boiler_life"] = 0.0
+            feat["has_boiler_safety_viol"] = 0.0
+
+        if "is_elevator" in df_dob_safety.columns:
+            safety_elev_past = safety_past[safety_past["is_elevator"]]
+            safety_elev_1y = safety_1y[safety_1y["is_elevator"]]
+            feat["dob_safety_elevator_1y"] = feat["bbl_int"].map(safety_elev_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["dob_safety_elevator_life"] = feat["bbl_int"].map(safety_elev_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+            feat["has_elevator_safety_viol"] = (feat["dob_safety_elevator_life"] > 0).astype(np.float32)
+        else:
+            feat["dob_safety_elevator_1y"] = 0.0
+            feat["dob_safety_elevator_life"] = 0.0
+            feat["has_elevator_safety_viol"] = 0.0
+    else:
+        feat["dob_safety_viol_1y"] = 0.0
+        feat["dob_safety_viol_3y"] = 0.0
+        feat["dob_safety_viol_life"] = 0.0
+        feat["dob_safety_boiler_1y"] = 0.0
+        feat["dob_safety_boiler_life"] = 0.0
+        feat["has_boiler_safety_viol"] = 0.0
+        feat["dob_safety_elevator_1y"] = 0.0
+        feat["dob_safety_elevator_life"] = 0.0
+        feat["has_elevator_safety_viol"] = 0.0
+
+    feat["multi_agency_distress_1y"] = (
+        feat["dob_viol_1y"] + feat["dob_ecb_viol_1y"] + feat["rodent_fail_1y"] + feat["dob_safety_viol_1y"]
+    ).astype(np.float32)
+    feat["multi_agency_distress_3y"] = (
+        feat["dob_viol_3y"] + feat["dob_ecb_viol_3y"] + feat["rodent_fail_3y"] + feat["dob_safety_viol_3y"]
+    ).astype(np.float32)
+    feat["has_multi_agency_distress"] = (feat["multi_agency_distress_1y"] > 0).astype(np.float32)
+
+    # DOF Tax Lien Sales
+    if len(df_tax_lien) > 0:
+        lien_past = df_tax_lien[(df_tax_lien["event_dt"].isna()) | (df_tax_lien["event_dt"] < cutoff_dt)]
+        feat["has_tax_lien_sale"] = feat["bbl_int"].isin(set(lien_past["bbl_int"])).astype(np.float32)
+    else:
+        feat["has_tax_lien_sale"] = 0.0
+
+    # HPD Underlying Conditions Program
+    if len(df_underlying) > 0:
+        und_past = df_underlying[(df_underlying["event_dt"].isna()) | (df_underlying["event_dt"] < cutoff_dt)]
+        feat["is_underlying_conditions_bldg"] = feat["bbl_int"].isin(set(und_past["bbl_int"])).astype(np.float32)
+    else:
+        feat["is_underlying_conditions_bldg"] = 0.0
+
+    # DOF Annualized Sales Features (strictly event_dt < cutoff_dt)
+    if len(df_sales) > 0 and df_sales["event_dt"].notna().any():
+        sales_past = df_sales[df_sales["event_dt"] < cutoff_dt]
+        sales_1y = sales_past[sales_past["event_dt"] >= dt_1y]
+        sales_3y = sales_past[sales_past["event_dt"] >= dt_3y]
+
+        feat["sale_count_1y"] = feat["bbl_int"].map(sales_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["sale_count_3y"] = feat["bbl_int"].map(sales_3y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+
+        max_dt_sale = sales_past.groupby("bbl_int")["event_dt"].max()
+        days_since_sale = (cutoff_dt - feat["bbl_int"].map(max_dt_sale)).dt.days.fillna(9999)
+        feat["days_since_last_sale"] = days_since_sale.clip(0, 9999).astype(np.float32)
+
+        sales_past_sorted = sales_past.sort_values("event_dt").drop_duplicates(subset=["bbl_int"], keep="last")
+        last_sale_map = sales_past_sorted.set_index("bbl_int")["amount"].to_dict()
+        feat["last_sale_price"] = feat["bbl_int"].map(last_sale_map).fillna(0.0).astype(np.float32)
+        feat["sale_price_per_unit"] = (feat["last_sale_price"] / (feat["unitsres"] + 1e-4)).astype(np.float32)
+    else:
+        feat["sale_count_1y"] = 0.0
+        feat["sale_count_3y"] = 0.0
+        feat["days_since_last_sale"] = 9999.0
+        feat["last_sale_price"] = 0.0
+        feat["sale_price_per_unit"] = 0.0
+
+    # Speculation Watch List Flag
+    if len(df_speculation) > 0:
+        feat["is_speculation_watch_bldg"] = feat["bbl_int"].isin(set(df_speculation["bbl_int"])).astype(np.float32)
+    else:
+        feat["is_speculation_watch_bldg"] = 0.0
+
+    # HPD OMO (Open Market Order) Emergency Contractor Interventions
+    if len(df_omo) > 0:
+        omo_past = df_omo[(df_omo["event_dt"].isna()) | (df_omo["event_dt"] < cutoff_dt)]
+        omo_1y = df_omo[(df_omo["event_dt"].notna()) & (df_omo["event_dt"] < cutoff_dt) & (df_omo["event_dt"] >= dt_1y)]
+        feat["omo_count_life"] = feat["bbl_int"].map(omo_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["omo_count_1y"] = feat["bbl_int"].map(omo_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["has_omo"] = (feat["omo_count_life"] > 0).astype(np.float32)
+        feat["omo_amount_life"] = feat["bbl_int"].map(omo_past.groupby("bbl_int")["amount"].sum()).fillna(0.0).astype(np.float32)
+        feat["omo_amount_1y"] = feat["bbl_int"].map(omo_1y.groupby("bbl_int")["amount"].sum()).fillna(0.0).astype(np.float32)
+        feat["omo_amount_per_unit"] = (feat["omo_amount_1y"] / (feat["unitsres"] + 1e-4)).astype(np.float32)
+    else:
+        feat["omo_count_life"] = 0.0
+        feat["omo_count_1y"] = 0.0
+        feat["has_omo"] = 0.0
+        feat["omo_amount_life"] = 0.0
+        feat["omo_amount_1y"] = 0.0
+        feat["omo_amount_per_unit"] = 0.0
+
+    # Unified Municipal Emergency Repair Program (ERP: HWO + OMO) charges
+    feat["erp_total_amount_1y"] = (feat["hwo_amount_1y"] + feat["omo_amount_1y"]).astype(np.float32)
+    feat["erp_total_count_1y"] = (feat["hwo_count_1y"] + feat["omo_count_1y"]).astype(np.float32)
+    feat["erp_amount_per_unit"] = (feat["erp_total_amount_1y"] / (feat["unitsres"] + 1e-4)).astype(np.float32)
+
+    # Landlord Registration Portfolio Contagion Dynamics via Contacts Resolution
+    if len(df_reg) > 0:
+        reg_past = df_reg[(df_reg["event_dt"].isna()) | (df_reg["event_dt"] < cutoff_dt)]
+        if len(reg_past) > 0:
+            if "event_dt" in reg_past.columns and reg_past["event_dt"].notna().any():
+                reg_valid = (
+                    reg_past[reg_past["registrationid"] > 0]
+                    .sort_values("event_dt")
+                    .drop_duplicates(subset=["bbl_int"], keep="last")
+                ).copy()
+            else:
+                reg_valid = reg_past[reg_past["registrationid"] > 0].drop_duplicates(
+                    subset=["bbl_int"], keep="last"
+                ).copy()
+
+            mapped_landlord = reg_valid["registrationid"].map(reg_to_landlord).fillna("")
+            reg_valid["landlord_id"] = np.where(
+                mapped_landlord != "",
+                mapped_landlord,
+                "REG_" + reg_valid["registrationid"].astype(str),
+            )
+            bbl_to_landlord = dict(zip(reg_valid["bbl_int"], reg_valid["landlord_id"]))
+
+            cohort_landlord = cohort_df["bbl_int"].map(bbl_to_landlord).fillna("")
+            has_landlord = (cohort_landlord != "")
+            feat["is_unregistered_owner"] = (~has_landlord).astype(np.float32)
+
+            reg_valid["viol_c_1y"] = reg_valid["bbl_int"].map(c_1y).fillna(0.0)
+            reg_valid["has_c_1y"] = (reg_valid["viol_c_1y"] > 0).astype(float)
+            bbl_to_comp = dict(zip(feat["bbl_int"], feat["comp_1y"]))
+            bbl_to_c_open = dict(zip(feat["bbl_int"], feat["viol_c_open_backlog"]))
+            bbl_to_erp = dict(zip(feat["bbl_int"], feat["erp_total_amount_1y"]))
+            reg_valid["comp_1y"] = reg_valid["bbl_int"].map(bbl_to_comp).fillna(0.0)
+            reg_valid["c_open"] = reg_valid["bbl_int"].map(bbl_to_c_open).fillna(0.0)
+            reg_valid["erp_1y"] = reg_valid["bbl_int"].map(bbl_to_erp).fillna(0.0)
+
+            bbl_to_units = dict(zip(feat["bbl_int"], feat["unitsres"]))
+            reg_valid["unitsres"] = reg_valid["bbl_int"].map(bbl_to_units).fillna(3.0)
+            bbl_to_lit = dict(zip(feat["bbl_int"], feat["lit_count_1y"]))
+            reg_valid["lit_1y"] = reg_valid["bbl_int"].map(bbl_to_lit).fillna(0.0)
+
+            port_size_map = reg_valid.groupby("landlord_id")["bbl_int"].count().to_dict()
+            port_viol_map = reg_valid.groupby("landlord_id")["viol_c_1y"].sum().to_dict()
+            port_has_c_map = reg_valid.groupby("landlord_id")["has_c_1y"].sum().to_dict()
+            port_comp_map = reg_valid.groupby("landlord_id")["comp_1y"].sum().to_dict()
+            port_c_open_map = reg_valid.groupby("landlord_id")["c_open"].sum().to_dict()
+            port_erp_map = reg_valid.groupby("landlord_id")["erp_1y"].sum().to_dict()
+            port_units_map = reg_valid.groupby("landlord_id")["unitsres"].sum().to_dict()
+            port_lit_map = reg_valid.groupby("landlord_id")["lit_1y"].sum().to_dict()
+
+            port_size = cohort_landlord.map(port_size_map).fillna(0.0).astype(np.float32)
+            port_c_sum = cohort_landlord.map(port_viol_map).fillna(0.0).astype(np.float32)
+            port_has_c_sum = cohort_landlord.map(port_has_c_map).fillna(0.0).astype(np.float32)
+            port_comp_sum = cohort_landlord.map(port_comp_map).fillna(0.0).astype(np.float32)
+            port_c_open_sum = cohort_landlord.map(port_c_open_map).fillna(0.0).astype(np.float32)
+            port_erp_sum = cohort_landlord.map(port_erp_map).fillna(0.0).astype(np.float32)
+            port_units_sum = cohort_landlord.map(port_units_map).fillna(0.0).astype(np.float32)
+            port_lit_sum = cohort_landlord.map(port_lit_map).fillna(0.0).astype(np.float32)
+
+            loo_c = np.maximum(port_c_sum - feat["viol_c_1y"], 0.0).astype(np.float32)
+            has_this_c = (feat["viol_c_1y"] > 0).astype(np.float32)
+            loo_has_c = np.maximum(port_has_c_sum - has_this_c, 0.0).astype(np.float32)
+            loo_comp = np.maximum(port_comp_sum - feat["comp_1y"], 0.0).astype(np.float32)
+            loo_c_backlog = np.maximum(port_c_open_sum - feat["viol_c_open_backlog"], 0.0).astype(np.float32)
+            loo_erp = np.maximum(port_erp_sum - feat["erp_total_amount_1y"], 0.0).astype(np.float32)
+            loo_units = np.maximum(port_units_sum - feat["unitsres"], 1.0).astype(np.float32)
+            loo_lit = np.maximum(port_lit_sum - feat["lit_count_1y"], 0.0).astype(np.float32)
+
+            feat["portfolio_lot_count"] = np.where(has_landlord, port_size, 0.0).astype(np.float32)
+            feat["portfolio_c_viol_loo_1y"] = np.where(has_landlord, loo_c, 0.0).astype(np.float32)
+            rem_lots = np.maximum(port_size - 1.0, 1.0)
+            feat["portfolio_viol_density"] = np.where(
+                (has_landlord) & (port_size > 1), loo_c / rem_lots, 0.0
+            ).astype(np.float32)
+            feat["portfolio_distress_fraction"] = np.where(
+                (has_landlord) & (port_size > 1), loo_has_c / rem_lots, 0.0
+            ).astype(np.float32)
+            feat["portfolio_comp_loo_1y"] = np.where(has_landlord, loo_comp, 0.0).astype(np.float32)
+            feat["portfolio_comp_density"] = np.where(
+                (has_landlord) & (port_size > 1), loo_comp / rem_lots, 0.0
+            ).astype(np.float32)
+            feat["portfolio_c_backlog_loo"] = np.where(has_landlord, loo_c_backlog, 0.0).astype(np.float32)
+            feat["portfolio_c_backlog_density"] = np.where(
+                (has_landlord) & (port_size > 1), loo_c_backlog / rem_lots, 0.0
+            ).astype(np.float32)
+            feat["portfolio_c_prevalence_loo"] = np.where(
+                (has_landlord) & (port_size > 1), (loo_c / loo_units).clip(0.0, 50.0), 0.0
+            ).astype(np.float32)
+            feat["portfolio_erp_amount_loo"] = np.where(has_landlord, loo_erp, 0.0).astype(np.float32)
+            feat["portfolio_erp_density"] = np.where(
+                (has_landlord) & (port_size > 1), loo_erp / rem_lots, 0.0
+            ).astype(np.float32)
+            feat["portfolio_lit_density"] = np.where(
+                (has_landlord) & (port_size > 1), loo_lit / rem_lots, 0.0
+            ).astype(np.float32)
+        else:
+            feat["is_unregistered_owner"] = 1.0
+            feat["portfolio_lot_count"] = 0.0
+            feat["portfolio_c_viol_loo_1y"] = 0.0
+            feat["portfolio_viol_density"] = 0.0
+            feat["portfolio_distress_fraction"] = 0.0
+            feat["portfolio_comp_loo_1y"] = 0.0
+            feat["portfolio_comp_density"] = 0.0
+            feat["portfolio_c_backlog_loo"] = 0.0
+            feat["portfolio_c_backlog_density"] = 0.0
+            feat["portfolio_c_prevalence_loo"] = 0.0
+            feat["portfolio_erp_amount_loo"] = 0.0
+            feat["portfolio_erp_density"] = 0.0
+            feat["portfolio_lit_density"] = 0.0
+    else:
+        feat["is_unregistered_owner"] = 1.0
+        feat["portfolio_lot_count"] = 0.0
+        feat["portfolio_c_viol_loo_1y"] = 0.0
+        feat["portfolio_viol_density"] = 0.0
+        feat["portfolio_distress_fraction"] = 0.0
+        feat["portfolio_comp_loo_1y"] = 0.0
+        feat["portfolio_comp_density"] = 0.0
+        feat["portfolio_c_backlog_loo"] = 0.0
+        feat["portfolio_c_backlog_density"] = 0.0
+        feat["portfolio_c_prevalence_loo"] = 0.0
+        feat["portfolio_erp_amount_loo"] = 0.0
+        feat["portfolio_erp_density"] = 0.0
+        feat["portfolio_lit_density"] = 0.0
+
+    # HPD Bedbug Infestation Reports
+    if len(df_bedbug) > 0:
+        bb_past = df_bedbug[(df_bedbug["event_dt"].isna()) | (df_bedbug["event_dt"] < cutoff_dt)]
+        bb_1y = df_bedbug[(df_bedbug["event_dt"].notna()) & (df_bedbug["event_dt"] < cutoff_dt) & (df_bedbug["event_dt"] >= dt_1y)]
+        bb_2y = df_bedbug[(df_bedbug["event_dt"].notna()) & (df_bedbug["event_dt"] < cutoff_dt) & (df_bedbug["event_dt"] >= dt_2y)]
+        feat["bedbug_reports_life"] = feat["bbl_int"].map(bb_past.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["bedbug_reports_1y"] = feat["bbl_int"].map(bb_1y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["bedbug_reports_2y"] = feat["bbl_int"].map(bb_2y.groupby("bbl_int").size()).fillna(0).astype(np.float32)
+        feat["has_bedbug_reports"] = (feat["bedbug_reports_life"] > 0).astype(np.float32)
+        feat["bedbug_infested_units_1y"] = feat["bbl_int"].map(bb_1y.groupby("bbl_int")["infested_units"].sum()).fillna(0.0).astype(np.float32)
+        feat["bedbug_infested_units_life"] = feat["bbl_int"].map(bb_past.groupby("bbl_int")["infested_units"].sum()).fillna(0.0).astype(np.float32)
+    else:
+        feat["bedbug_reports_life"] = 0.0
+        feat["bedbug_reports_1y"] = 0.0
+        feat["bedbug_reports_2y"] = 0.0
+        feat["has_bedbug_reports"] = 0.0
+        feat["bedbug_infested_units_1y"] = 0.0
+        feat["bedbug_infested_units_life"] = 0.0
+
+    # Composite Distress Score with Cross-Agency, Contractor Intervention & Winter Surge weighting
+    feat["composite_distress"] = (
+        feat["viol_c_1y"] * 2.5
+        + feat["viol_c_90d"] * 3.5
+        + feat["viol_c_14d"] * 4.0
+        + feat["comp_14d"] * 2.0
+        + feat["comp_heat_14d"] * 3.0
+        + feat["viol_c_common_area_1y"] * 2.5
+        + feat["lit_open_cases"] * 2.0
+        + feat["portfolio_c_prevalence_loo"] * 2.5
+        + feat["comp_90d"] * 1.5
+        + feat["has_viol_c_1y"] * 3.0
+        + feat["lit_count_2y"] * 2.0
+        + feat["is_aep_building"] * 4.0
+        + feat["has_vacate_order"] * 3.5
+        + (feat["hwo_count"] > 0) * 2.0
+        + feat["hwo_count_1y"] * 3.0
+        + feat["has_hwo_1y"] * 2.5
+        + feat["has_litigation"] * 1.5
+        + feat["dob_viol_1y"] * 1.5
+        + feat["dob_ecb_viol_1y"] * 1.5
+        + feat["rodent_fail_1y"] * 1.0
+        + feat["viol_c_winter_surge"] * 2.0
+        + feat["comp_heat_winter_surge"] * 2.5
+        + feat["comp_heat_winter_velocity"] * 1.5
+        + feat["comp_heat_q4"] * 2.0
+        + feat["viol_c_q4"] * 2.0
+        + feat["comp_paint_1y"] * 1.5
+        + feat["comp_leak_1y"] * 1.5
+        + feat["unmet_inspection_pressure"] * 1.0
+        + feat["uninspected_comp_deficit"] * 1.5
+        + feat["comp_q4_uninspected_deficit"] * 2.0
+        + feat["b_to_c_escalation_90d"] * 1.5
+        + feat["chronic_recidivism_years_c"] * 2.0
+        + feat["omo_count_1y"] * 3.0
+        + (feat["bedbug_reports_1y"] > 0) * 1.5
+        + feat["dob_safety_viol_1y"] * 1.5
+        + feat["has_tax_lien_sale"] * 2.0
+        + feat["is_underlying_conditions_bldg"] * 2.5
+        + feat["portfolio_viol_density"] * 2.0
+        + feat["portfolio_c_backlog_loo"] * 1.5
+        + feat["is_speculation_watch_bldg"] * 2.5
+        + (feat["sale_count_1y"] > 0) * 1.5
+        + feat["insp_visits_c_1y"] * 1.5
+        + feat["comp_open_tot"] * 1.5
+        + feat["comp_open_30d"] * 2.0
+        + feat["viol_c_delinquent_count"] * 2.5
+        + feat["viol_c_failure_rate_1y"] * 2.0
+        + feat["comp_heat_winter_per_unit"] * 2.5
+        + feat["erp_total_count_1y"] * 2.5
+        + feat["has_litigation_1y"] * 2.0
+        + feat["recid_chronic_consecutive"] * 2.0
+        + feat["eviction_count_1y"] * 2.0
+        + (feat["eviction_count_3y"] > 0) * 1.5
+        + feat["viol_c_fire_safety_1y"] * 2.5
+        + feat["viol_b_delinquent_backlog"] * 2.0
+        + feat["comp_distinct_dates_90d"] * 1.5
+        + feat["comp_electric_1y"] * 1.5
+        + feat["comp_door_window_1y"] * 1.5
+        + (feat["hpd_bldg_count"] > 1.0) * 1.5
+        + feat["dob_ecb_class1_1y"] * 3.5
+        + feat["has_dob_ecb_class1_life"] * 2.0
+        + (feat["dob_ecb_penalty_balance"] > 0) * 1.5
+        + feat["dob_safety_boiler_1y"] * 3.0
+        + feat["dob_safety_elevator_1y"] * 2.5
+        + feat["has_comprehensive_lit"] * 4.0
+        + feat["has_access_lit"] * 3.0
+        + feat["viol_c_accel_to_backlog"] * 2.0
+        + feat["chronic_backlog_pressure"] * 2.0
+    )
+
+    # 5-digit ZIP Code Empirical Bayes Smoothed Violation Risk & Peer Deviations
+    if "zipcode" in cohort_df.columns:
+        zip_series = pd.to_numeric(cohort_df["zipcode"], errors="coerce").fillna(0).astype(int)
+        global_mean_c = feat["viol_c_2y"].mean()
+        prior_weight = 25.0
+        zip_sum = feat.groupby(zip_series)["viol_c_2y"].transform("sum")
+        zip_count = feat.groupby(zip_series)["viol_c_2y"].transform("count")
+        feat["zip_smoothed_risk"] = ((zip_sum + prior_weight * global_mean_c) / (zip_count + prior_weight)).astype(np.float32)
+        feat["lot_to_zip_risk_ratio"] = (feat["viol_c_1y"] / (feat["zip_smoothed_risk"] + 1e-4)).astype(np.float32)
+
+        zip_median_c = feat.groupby(zip_series)["viol_c_1y"].transform("median")
+        feat["zip_median_c_viol"] = zip_median_c.astype(np.float32)
+        feat["zip_viol_c_deviation"] = (feat["viol_c_1y"] - feat["zip_median_c_viol"]).astype(np.float32)
+        feat["zip_viol_c_ratio"] = (feat["viol_c_1y"] / (feat["zip_median_c_viol"] + 1.0)).astype(np.float32)
+    else:
+        feat["zip_smoothed_risk"] = 0.0
+        feat["lot_to_zip_risk_ratio"] = 0.0
+        feat["zip_median_c_viol"] = 0.0
+        feat["zip_viol_c_deviation"] = 0.0
+        feat["zip_viol_c_ratio"] = 0.0
+
+    # Spatial Community District Empirical Risk & Peer Deviations
+    cd_rates = feat.groupby("cd")["viol_c_2y"].mean().to_dict()
+    feat["cd_hist_c_density"] = feat["cd"].map(cd_rates).fillna(0)
+    feat["lot_vs_cd_risk"] = feat["viol_c_1y"] / (feat["cd_hist_c_density"] + 1e-4)
+
+    cd_median_c = feat.groupby("cd")["viol_c_1y"].transform("median")
+    feat["cd_median_c_viol"] = cd_median_c.astype(np.float32)
+    feat["cd_viol_c_deviation"] = (feat["viol_c_1y"] - feat["cd_median_c_viol"]).astype(np.float32)
+    feat["cd_viol_c_ratio"] = (feat["viol_c_1y"] / (feat["cd_median_c_viol"] + 1.0)).astype(np.float32)
+
+    # Cohort-relative normalized violation and complaint intensities
+    mean_c_1y = max(float(feat["viol_c_1y"].mean()), 1e-4)
+    mean_tot_1y = max(float(feat["viol_tot_1y"].mean()), 1e-4)
+    mean_comp_1y = max(float(feat["comp_1y"].mean()), 1e-4)
+    feat["viol_c_1y_cohort_norm"] = (feat["viol_c_1y"] / mean_c_1y).astype(np.float32)
+    feat["viol_tot_1y_cohort_norm"] = (feat["viol_tot_1y"] / mean_tot_1y).astype(np.float32)
+    feat["comp_1y_cohort_norm"] = (feat["comp_1y"] / mean_comp_1y).astype(np.float32)
+
+    feat = feat.drop(columns=["bbl_int"])
+    return feat
+
+
+print("Engineering features for Train (2020 & 2021), Val (2022), and Test (2023)...")
+X_train_2020 = extract_features(
+    train_bbls_2020, pd.Timestamp("2020-01-01"), df_pluto_train_2020
+)
+y_train_2020 = pd.Series(train_bbls_2020).isin(pos_train_2020).astype(int).values
+y_train_count_2020 = pd.Series(train_bbls_2020).map(counts_train_2020).fillna(0).values.astype(np.float32)
+
+X_train_2021 = extract_features(
+    train_bbls_2021, pd.Timestamp("2021-01-01"), df_pluto_train_2021
+)
+y_train_2021 = pd.Series(train_bbls_2021).isin(pos_train_2021).astype(int).values
+y_train_count_2021 = pd.Series(train_bbls_2021).map(counts_train_2021).fillna(0).values.astype(np.float32)
+
+X_val = extract_features(val_bbls, pd.Timestamp("2022-01-01"), df_pluto_val)
+y_val = pd.Series(val_bbls).isin(pos_val).astype(int).values
+y_val_count = pd.Series(val_bbls).map(counts_val).fillna(0).values.astype(np.float32)
+y_val_sev = np.log1p(y_val_count).astype(np.float32)
+
+# Ensure feature extraction strictly preserves df_test entity alignment
+X_test = extract_features(df_test["bbl_int"].values, pd.Timestamp("2023-01-01"), df_pluto_test)
+
+if len(X_train_2020) > 0:
+    X_train = pd.concat([X_train_2020, X_train_2021], ignore_index=True)
+    y_train = np.concatenate([y_train_2020, y_train_2021])
+    y_train_count = np.concatenate([y_train_count_2020, y_train_count_2021])
+    sample_weight_train = np.concatenate([
+        np.full(len(train_bbls_2020), 0.60, dtype=np.float32),
+        np.full(len(train_bbls_2021), 1.0, dtype=np.float32),
+    ])
+else:
+    X_train = X_train_2021
+    y_train = y_train_2021
+    y_train_count = y_train_count_2021
+    sample_weight_train = np.ones(len(train_bbls_2021), dtype=np.float32)
+
+y_train_sev = np.log1p(y_train_count).astype(np.float32)
+
+del X_train_2020, X_train_2021, df_pluto_train_2020, df_pluto_train_2021
+gc.collect()
+
+# Align feature columns and cast all features to float32
+feature_cols = [
+    c
+    for c in X_train.columns
+    if c in X_val.columns and c in X_test.columns and c not in ["cd", "zipcode"]
+]
+X_train = X_train[feature_cols].fillna(0).astype(np.float32)
+X_val = X_val[feature_cols].fillna(0).astype(np.float32)
+X_test = X_test[feature_cols].fillna(0).astype(np.float32)
+y_train = y_train.astype(np.float32)
+y_val = y_val.astype(np.float32)
+
+print(
+    f"Extracted {len(feature_cols)} features. Pooled Train size: {len(X_train)} "
+    f"(prevalence: {y_train.mean():.4f}), Val size: {len(X_val)} (prevalence: {y_val.mean():.4f})"
+)
+
+# ---------------------------------------------------------
+# 7. MULTI-DEPTH LIGHTGBM & DEPTHWISE XGBOOST MODELS
+# ---------------------------------------------------------
+cat_cols = [c for c in ["borough", "bldgclass_archetype", "proxcode", "bsmtcode", "landuse_code"] if c in feature_cols]
+print(f"Identified {len(cat_cols)} native categorical features for LightGBM: {cat_cols}")
+
+print("Training leaf-wise exact LightGBM booster (num_leaves=80, scale_pos_weight=1.2, L2 reg)...")
+params_shallow = {
+    "objective": "binary",
+    "metric": "average_precision",
+    "boosting_type": "gbdt",
+    "extra_trees": False,
+    "max_depth": -1,
+    "num_leaves": 80,
+    "learning_rate": 0.030,
+    "subsample": 0.80,
+    "bagging_freq": 1,
+    "colsample_bytree": 0.60,
+    "scale_pos_weight": 1.2,
+    "min_child_samples": 50,
+    "reg_alpha": 1.5,
+    "reg_lambda": 4.5,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbose": -1,
+}
+
+print("Training medium exact LightGBM booster (max_depth=7, num_leaves=96, scale_pos_weight=2.0)...")
+params_mid = {
+    "objective": "binary",
+    "metric": "average_precision",
+    "boosting_type": "gbdt",
+    "extra_trees": False,
+    "max_depth": 7,
+    "num_leaves": 96,
+    "learning_rate": 0.030,
+    "subsample": 0.80,
+    "bagging_freq": 1,
+    "colsample_bytree": 0.65,
+    "scale_pos_weight": 2.0,
+    "min_child_samples": 40,
+    "reg_alpha": 1.0,
+    "reg_lambda": 2.5,
+    "random_state": 1337,
+    "n_jobs": -1,
+    "verbose": -1,
+}
+
+print("Training deep exact LightGBM booster (max_depth=8, num_leaves=160, scale_pos_weight=1.5)...")
+params_deep = {
+    "objective": "binary",
+    "metric": "average_precision",
+    "boosting_type": "gbdt",
+    "extra_trees": False,
+    "max_depth": 8,
+    "num_leaves": 160,
+    "learning_rate": 0.030,
+    "subsample": 0.80,
+    "bagging_freq": 1,
+    "colsample_bytree": 0.55,
+    "scale_pos_weight": 1.5,
+    "min_child_samples": 50,
+    "reg_alpha": 1.2,
+    "reg_lambda": 3.0,
+    "random_state": 777,
+    "n_jobs": -1,
+    "verbose": -1,
+}
+
+dtrain_lgb = lgb.Dataset(X_train, label=y_train, weight=sample_weight_train, categorical_feature=cat_cols, free_raw_data=False)
+dval_lgb = lgb.Dataset(X_val, label=y_val, reference=dtrain_lgb, categorical_feature=cat_cols, free_raw_data=False)
+
+model_shallow = lgb.train(
+    params_shallow,
+    dtrain_lgb,
+    num_boost_round=1200,
+    valid_sets=[dval_lgb],
+    callbacks=[lgb.early_stopping(50, verbose=False)],
+)
+
+model_mid = lgb.train(
+    params_mid,
+    dtrain_lgb,
+    num_boost_round=1200,
+    valid_sets=[dval_lgb],
+    callbacks=[lgb.early_stopping(50, verbose=False)],
+)
+
+model_deep = lgb.train(
+    params_deep,
+    dtrain_lgb,
+    num_boost_round=1200,
+    valid_sets=[dval_lgb],
+    callbacks=[lgb.early_stopping(50, verbose=False)],
+)
+
+del dtrain_lgb, dval_lgb
+gc.collect()
+
+val_preds_shallow = model_shallow.predict(X_val)
+val_preds_mid = model_mid.predict(X_val)
+val_preds_deep = model_deep.predict(X_val)
+
+test_preds_shallow = model_shallow.predict(X_test)
+test_preds_mid = model_mid.predict(X_test)
+test_preds_deep = model_deep.predict(X_test)
+
+# Aliases for backwards compatibility
+model_goss = model_mid
+model_dart = model_deep
+val_preds_goss = val_preds_mid
+val_preds_dart = val_preds_deep
+test_preds_goss = test_preds_mid
+test_preds_dart = test_preds_deep
+
+for m in [model_shallow, model_mid, model_deep, model_goss, model_dart]:
+    m.predict_proba = lambda X, b=m: np.column_stack([1.0 - b.predict(X), b.predict(X)])
+
+print("Training exact multi-depth XGBoost fleet (shallow d=6 scale_pos=1.2, mid d=7 scale_pos=2.0, deep d=8 scale_pos=1.5)...")
+try:
+    xgb_shallow = xgb.XGBClassifier(
+        n_estimators=1200,
+        max_depth=6,
+        learning_rate=0.032,
+        scale_pos_weight=1.2,
+        subsample=0.80,
+        colsample_bytree=0.70,
+        colsample_bylevel=0.70,
+        colsample_bynode=0.70,
+        min_child_weight=3,
+        reg_alpha=0.8,
+        reg_lambda=2.0,
+        tree_method="hist",
+        random_state=888,
+        eval_metric="aucpr",
+        early_stopping_rounds=50,
+        n_jobs=-1,
+    )
+    xgb_shallow.fit(
+        X_train,
+        y_train,
+        sample_weight=sample_weight_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+    )
+except TypeError:
+    xgb_shallow = xgb.XGBClassifier(
+        n_estimators=1200,
+        max_depth=6,
+        learning_rate=0.032,
+        scale_pos_weight=1.2,
+        subsample=0.80,
+        colsample_bytree=0.70,
+        colsample_bylevel=0.70,
+        colsample_bynode=0.70,
+        min_child_weight=3,
+        reg_alpha=0.8,
+        reg_lambda=2.0,
+        tree_method="hist",
+        random_state=888,
+        eval_metric="aucpr",
+        n_jobs=-1,
+    )
+    xgb_shallow.fit(
+        X_train,
+        y_train,
+        sample_weight=sample_weight_train,
+        eval_set=[(X_val, y_val)],
+        early_stopping_rounds=50,
+        verbose=False,
+    )
+xgb_shallow.predict = lambda X: xgb_shallow.predict_proba(X)[:, 1]
+
+try:
+    xgb_mid = xgb.XGBClassifier(
+        n_estimators=1200,
+        max_depth=7,
+        learning_rate=0.030,
+        scale_pos_weight=2.0,
+        subsample=0.80,
+        colsample_bytree=0.65,
+        colsample_bylevel=0.70,
+        colsample_bynode=0.70,
+        min_child_weight=4,
+        reg_alpha=1.2,
+        reg_lambda=3.0,
+        tree_method="hist",
+        random_state=1337,
+        eval_metric="aucpr",
+        early_stopping_rounds=50,
+        n_jobs=-1,
+    )
+    xgb_mid.fit(
+        X_train,
+        y_train,
+        sample_weight=sample_weight_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+    )
+except TypeError:
+    xgb_mid = xgb.XGBClassifier(
+        n_estimators=1200,
+        max_depth=7,
+        learning_rate=0.030,
+        scale_pos_weight=2.0,
+        subsample=0.80,
+        colsample_bytree=0.65,
+        colsample_bylevel=0.70,
+        colsample_bynode=0.70,
+        min_child_weight=4,
+        reg_alpha=1.2,
+        reg_lambda=3.0,
+        tree_method="hist",
+        random_state=1337,
+        eval_metric="aucpr",
+        n_jobs=-1,
+    )
+    xgb_mid.fit(
+        X_train,
+        y_train,
+        sample_weight=sample_weight_train,
+        eval_set=[(X_val, y_val)],
+        early_stopping_rounds=50,
+        verbose=False,
+    )
+xgb_mid.predict = lambda X: xgb_mid.predict_proba(X)[:, 1]
+
+try:
+    xgb_deep = xgb.XGBClassifier(
+        n_estimators=1200,
+        max_depth=8,
+        learning_rate=0.028,
+        scale_pos_weight=1.5,
+        subsample=0.80,
+        colsample_bytree=0.55,
+        colsample_bylevel=0.65,
+        colsample_bynode=0.65,
+        min_child_weight=5,
+        reg_alpha=1.5,
+        reg_lambda=4.0,
+        tree_method="hist",
+        random_state=42,
+        eval_metric="aucpr",
+        early_stopping_rounds=50,
+        n_jobs=-1,
+    )
+    xgb_deep.fit(
+        X_train,
+        y_train,
+        sample_weight=sample_weight_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False,
+    )
+except TypeError:
+    xgb_deep = xgb.XGBClassifier(
+        n_estimators=1200,
+        max_depth=8,
+        learning_rate=0.028,
+        scale_pos_weight=1.5,
+        subsample=0.80,
+        colsample_bytree=0.55,
+        colsample_bylevel=0.65,
+        colsample_bynode=0.65,
+        min_child_weight=5,
+        reg_alpha=1.5,
+        reg_lambda=4.0,
+        tree_method="hist",
+        random_state=42,
+        eval_metric="aucpr",
+        n_jobs=-1,
+    )
+    xgb_deep.fit(
+        X_train,
+        y_train,
+        sample_weight=sample_weight_train,
+        eval_set=[(X_val, y_val)],
+        early_stopping_rounds=50,
+        verbose=False,
+    )
+xgb_deep.predict = lambda X: xgb_deep.predict_proba(X)[:, 1]
+
+xgb_d5 = xgb_shallow
+xgb_model = xgb_deep
+
+val_preds_xgb_shallow = xgb_shallow.predict_proba(X_val)[:, 1]
+test_preds_xgb_shallow = xgb_shallow.predict_proba(X_test)[:, 1]
+val_preds_xgb_mid = xgb_mid.predict_proba(X_val)[:, 1]
+test_preds_xgb_mid = xgb_mid.predict_proba(X_test)[:, 1]
+val_preds_xgb_deep = xgb_deep.predict_proba(X_val)[:, 1]
+test_preds_xgb_deep = xgb_deep.predict_proba(X_test)[:, 1]
+val_preds_xgb_d5 = val_preds_xgb_shallow
+test_preds_xgb_d5 = test_preds_xgb_shallow
+
+
+# ---------------------------------------------------------
+# 8. HIGH-THROUGHPUT TABULAR RESNET WITH SWIGLU & SE GATING
+# ---------------------------------------------------------
+class SEBlock(nn.Module):
+    """Squeeze-and-Excitation channel gating over tabular representations."""
+
+    def __init__(self, d_model: int, reduction: int = 4):
+        super().__init__()
+        squeeze_dim = max(8, d_model // reduction)
+        self.fc = nn.Sequential(
+            nn.Linear(d_model, squeeze_dim),
+            nn.SiLU(),
+            nn.Linear(squeeze_dim, d_model),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        scale = self.fc(x)
+        return x * scale
+
+
+class TabularResBlock(nn.Module):
+    """Residual block with Pre-LayerNorm, SwiGLU feedforward, and SE gating."""
+
+    def __init__(
+        self,
+        d_model: int,
+        ffn_mult: float = 2.0,
+        dropout: float = 0.25,
+        se_reduction: int = 4,
+    ):
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model)
+        hidden_dim = int(d_model * ffn_mult)
+        self.w_gate = nn.Linear(d_model, hidden_dim)
+        self.w_up = nn.Linear(d_model, hidden_dim)
+        self.w_down = nn.Linear(hidden_dim, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self.se = SEBlock(d_model, reduction=se_reduction)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        h = self.norm(x)
+        swiglu = F.silu(self.w_gate(h)) * self.w_up(h)
+        h = self.dropout(self.w_down(swiglu))
+        h = self.se(h)
+        return residual + h
+
+
+class TabularResNet(nn.Module):
+    """High-Throughput Tabular ResNet with categorical embeddings, SwiGLU blocks, SE gating, and residual skip connections."""
+
+    def __init__(
+        self,
+        num_continuous: int,
+        cat_dims: list = None,
+        cat_emb_dims: list = None,
+        d_model: int = 192,
+        n_blocks: int = 2,
+        ffn_mult: float = 2.0,
+        dropout: float = 0.25,
+        head_dropout: float = 0.30,
+    ):
+        super().__init__()
+        self.cat_dims = cat_dims or []
+        if self.cat_dims:
+            if cat_emb_dims is None:
+                cat_emb_dims = [min(16, max(4, (d + 1) // 2)) for d in self.cat_dims]
+            self.embeddings = nn.ModuleList([
+                nn.Embedding(num_embeddings=d, embedding_dim=ed)
+                for d, ed in zip(self.cat_dims, cat_emb_dims)
+            ])
+            total_in_dim = num_continuous + sum(cat_emb_dims)
+        else:
+            self.embeddings = None
+            total_in_dim = num_continuous
+
+        self.input_proj = nn.Linear(total_in_dim, d_model)
+        self.blocks = nn.ModuleList(
+            [
+                TabularResBlock(
+                    d_model=d_model,
+                    ffn_mult=ffn_mult,
+                    dropout=dropout,
+                    se_reduction=4,
+                )
+                for _ in range(n_blocks)
+            ]
+        )
+        self.final_norm = nn.LayerNorm(d_model)
+        self.head = nn.Sequential(
+            nn.Linear(d_model, d_model // 2),
+            nn.SiLU(),
+            nn.Dropout(head_dropout),
+            nn.Linear(d_model // 2, 1),
+        )
+        self.head_binary = self.head
+
+    def forward(self, x_cont: torch.Tensor, x_cat: torch.Tensor = None):
+        if self.embeddings is not None and x_cat is not None:
+            emb_list = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
+            x_emb = torch.cat(emb_list, dim=-1)
+            x = torch.cat([x_cont, x_emb], dim=-1)
+        else:
+            x = x_cont
+        h = self.input_proj(x)
+        for block in self.blocks:
+            h = block(h)
+        h = self.final_norm(h)
+        logits = self.head(h).squeeze(-1)
+        return logits
+
+
+class WeightedFocalBCELoss(nn.Module):
+    """Numerically stable binary focal loss with positive class weighting and pure focal modulation."""
+
+    def __init__(self, gamma: float = 2.0, pos_weight: float = 1.5, label_smoothing: float = 0.0):
+        super().__init__()
+        self.gamma = gamma
+        self.pos_weight = pos_weight
+        self.label_smoothing = label_smoothing
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        weight: torch.Tensor = None,
+    ) -> torch.Tensor:
+        probs = torch.sigmoid(logits)
+        probs = torch.clamp(probs, min=1e-7, max=1.0 - 1e-7)
+        if self.label_smoothing > 0.0:
+            targets_smooth = targets * (1.0 - 2.0 * self.label_smoothing) + self.label_smoothing
+        else:
+            targets_smooth = targets
+        pt = torch.where(targets == 1, probs, 1.0 - probs)
+        focal_factor = torch.pow(1.0 - pt, self.gamma)
+        bce = -(
+            self.pos_weight * targets_smooth * torch.log(probs)
+            + (1.0 - targets_smooth) * torch.log(1.0 - probs)
+        )
+        loss = focal_factor * bce
+        if weight is not None:
+            return torch.sum(loss * weight) / (torch.sum(weight) + 1e-8)
+        return torch.mean(loss)
+
+
+def build_model_and_optimizer(
+    num_features: int,
+    cat_dims: list = None,
+    lr: float = 2e-4,
+    weight_decay: float = 1e-3,
+    dev: torch.device = device,
+    epochs: int = 16,
+    warmup_epochs: int = 2,
+):
+    model = TabularResNet(
+        num_continuous=num_features,
+        cat_dims=cat_dims,
+        d_model=192,
+        n_blocks=2,
+        ffn_mult=2.0,
+        dropout=0.25,
+        head_dropout=0.30,
+    ).to(dev)
+
+    criterion = WeightedFocalBCELoss(gamma=2.0, pos_weight=1.5, label_smoothing=0.0).to(dev)
+
+    decay_params = []
+    no_decay_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if "norm" in name or "bias" in name or param.ndim <= 1:
+            no_decay_params.append(param)
+        else:
+            decay_params.append(param)
+
+    optimizer = AdamW(
+        [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ],
+        lr=lr,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+    )
+
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=0.2,
+        end_factor=1.0,
+        total_iters=warmup_epochs,
+    )
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, epochs - warmup_epochs),
+        eta_min=1e-5,
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_epochs],
+    )
+
+    return model, criterion, optimizer, scheduler
+
+
+# ---------------------------------------------------------
+# 9. NEURAL MODEL TRAINING & EVALUATION
+# ---------------------------------------------------------
+print("Preparing tensor datasets: Gaussian Quantile Transformation for continuous features and categorical routing...")
+
+neural_cat_cols = [c for c in cat_cols if c in feature_cols]
+non_cat_cols = [c for c in feature_cols if c not in neural_cat_cols]
+
+cat_encoders = {}
+cat_dims = []
+for c in neural_cat_cols:
+    uvals = np.sort(np.unique(np.concatenate([
+        X_train[c].values, X_val[c].values, X_test[c].values
+    ])))
+    cat_encoders[c] = {v: i for i, v in enumerate(uvals)}
+    cat_dims.append(len(uvals))
+
+
+def encode_cats(df):
+    arr = np.zeros((len(df), len(neural_cat_cols)), dtype=np.int64)
+    for i, c in enumerate(neural_cat_cols):
+        m = cat_encoders[c]
+        arr[:, i] = df[c].map(m).fillna(0).astype(np.int64).values
+    return arr
+
+
+X_tr_cat = encode_cats(X_train)
+X_val_cat = encode_cats(X_val)
+X_te_cat = encode_cats(X_test)
+
+binary_cols = []
+cont_cols = []
+for c in non_cat_cols:
+    uvals = np.unique(X_train[c].values[:10000])
+    if len(uvals) <= 2 and np.isin(uvals, [0.0, 1.0]).all():
+        binary_cols.append(c)
+    else:
+        cont_cols.append(c)
+
+print(
+    f"Neural preprocessing partitioned {len(feature_cols)} features: "
+    f"{len(cont_cols)} continuous (Gaussian Quantile Transformation), {len(binary_cols)} binary indicators, "
+    f"and {len(neural_cat_cols)} discrete categorical features (neural embeddings)."
+)
+
+qt = QuantileTransformer(
+    n_quantiles=2000,
+    output_distribution="normal",
+    random_state=42,
+    subsample=200000,
+)
+X_tr_cont = qt.fit_transform(X_train[cont_cols].values.astype(np.float32)).astype(np.float32)
+X_val_cont = qt.transform(X_val[cont_cols].values.astype(np.float32)).astype(np.float32)
+X_te_cont = qt.transform(X_test[cont_cols].values.astype(np.float32)).astype(np.float32)
+
+X_tr_cont_all = np.hstack([X_tr_cont, X_train[binary_cols].values.astype(np.float32)])
+X_val_cont_all = np.hstack([X_val_cont, X_val[binary_cols].values.astype(np.float32)])
+X_te_cont_all = np.hstack([X_te_cont, X_test[binary_cols].values.astype(np.float32)])
+
+train_dataset = TensorDataset(
+    torch.tensor(X_tr_cont_all, dtype=torch.float32),
+    torch.tensor(X_tr_cat, dtype=torch.long),
+    torch.tensor(y_train, dtype=torch.float32),
+    torch.tensor(sample_weight_train, dtype=torch.float32),
+)
+val_dataset = TensorDataset(
+    torch.tensor(X_val_cont_all, dtype=torch.float32),
+    torch.tensor(X_val_cat, dtype=torch.long),
+)
+test_dataset = TensorDataset(
+    torch.tensor(X_te_cont_all, dtype=torch.float32),
+    torch.tensor(X_te_cat, dtype=torch.long),
+)
+
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=2048,
+    shuffle=True,
+    drop_last=True,
+    num_workers=0,
+    pin_memory=torch.cuda.is_available(),
+)
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=2048,
+    shuffle=False,
+    num_workers=0,
+    pin_memory=torch.cuda.is_available(),
+)
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=2048,
+    shuffle=False,
+    num_workers=0,
+    pin_memory=torch.cuda.is_available(),
+)
+
+
+def predict_dataloader(net, loader, dev):
+    net.eval()
+    all_logits = []
+    with torch.no_grad():
+        for batch in loader:
+            x_cont_b = batch[0].to(dev)
+            x_cat_b = batch[1].to(dev)
+            logits = net(x_cont_b, x_cat_b)
+            all_logits.append(logits.detach().cpu().numpy())
+    return np.concatenate(all_logits)
+
+
+epochs = 16
+nn_model, criterion, optimizer, scheduler = build_model_and_optimizer(
+    num_features=X_tr_cont_all.shape[1],
+    cat_dims=cat_dims,
+    lr=2e-4,
+    weight_decay=1e-3,
+    dev=device,
+    epochs=epochs,
+)
+
+best_val_ap = -1.0
+best_model_path = "working/best_tabular_resnet.pt"
+patience = 5
+patience_counter = 0
+epoch_snapshots = []
+
+for epoch in range(epochs):
+    nn_model.train()
+    running_loss = 0.0
+    total_batches = 0
+
+    for x_cont_b, x_cat_b, y_bin_b, w_b in train_loader:
+        x_cont_b = x_cont_b.to(device)
+        x_cat_b = x_cat_b.to(device)
+        y_bin_b = y_bin_b.to(device)
+        w_b = w_b.to(device)
+
+        optimizer.zero_grad()
+        logits = nn_model(x_cont_b, x_cat_b)
+        loss = criterion(logits, y_bin_b, weight=w_b)
+
+        loss.backward()
+        nn.utils.clip_grad_norm_(nn_model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        running_loss += loss.item()
+        total_batches += 1
+
+    scheduler.step()
+    epoch_loss = running_loss / max(1, total_batches)
+
+    val_logits_nn = predict_dataloader(nn_model, val_loader, device)
+    current_val_ap = average_precision_score(y_val, val_logits_nn)
+
+    snapshot_state = {k: v.detach().cpu().clone() for k, v in nn_model.state_dict().items()}
+    epoch_snapshots.append((current_val_ap, snapshot_state))
+
+    if current_val_ap > best_val_ap:
+        best_val_ap = current_val_ap
+        torch.save(nn_model.state_dict(), best_model_path)
+        patience_counter = 0
+    else:
+        patience_counter += 1
+
+    print(
+        f"Epoch {epoch + 1}/{epochs} - Train Loss: {epoch_loss:.4f} - Val AP:"
+        f" {current_val_ap:.5f} (Patience: {patience_counter}/{patience})"
+    )
+
+    if patience_counter >= patience:
+        print(f"Early stopping triggered at epoch {epoch + 1} with best standalone Val AP: {best_val_ap:.5f}")
+        break
+
+# Regularized Checkpoint Snapshot Averaging across top-3 validation epochs
+top_snapshots = sorted(epoch_snapshots, key=lambda s: s[0], reverse=True)[:3]
+print(f"Averaging top-{len(top_snapshots)} checkpoint snapshots with Val APs: {[round(s[0], 5) for s in top_snapshots]}")
+avg_state_dict = {}
+for k in top_snapshots[0][1].keys():
+    tensors = [s[1][k].float() for s in top_snapshots]
+    avg_state_dict[k] = torch.stack(tensors).mean(dim=0).to(top_snapshots[0][1][k].dtype)
+
+nn_model.load_state_dict(avg_state_dict)
+torch.save(nn_model.state_dict(), best_model_path)
+
+# ---------------------------------------------------------
+# 10. ENSEMBLING, VALIDATION EVALUATION & TEST INFERENCE
+# ---------------------------------------------------------
+print("Computing rank-normalized ensemble predictions...")
+nn_model.load_state_dict(torch.load(best_model_path, map_location=device))
+nn_model.eval()
+
+# Bind standardized continuous predict method to nn_model preserving indicator geometry
+def nn_predict(X_input):
+    nn_model.eval()
+    if isinstance(X_input, pd.DataFrame):
+        df_in = X_input
+    else:
+        df_in = pd.DataFrame(X_input, columns=feature_cols)
+    arr_cont = np.nan_to_num(df_in[cont_cols].values, nan=0.0)
+    arr_cont_scaled = qt.transform(arr_cont).astype(np.float32)
+    arr_bin = np.nan_to_num(df_in[binary_cols].values, nan=0.0).astype(np.float32)
+    arr_norm = np.hstack([arr_cont_scaled, arr_bin])
+    arr_cat = encode_cats(df_in)
+    eval_ds = TensorDataset(
+        torch.tensor(arr_norm, dtype=torch.float32),
+        torch.tensor(arr_cat, dtype=torch.long),
+    )
+    eval_ld = DataLoader(eval_ds, batch_size=2048, shuffle=False)
+    l_bin = predict_dataloader(nn_model, eval_ld, device)
+    return rankdata(l_bin) / len(l_bin)
+
+nn_model.predict = nn_predict
+nn_model.predict_proba = lambda X: np.column_stack(
+    [1.0 - nn_predict(X), nn_predict(X)]
+)
+
+val_logits_nn = predict_dataloader(nn_model, val_loader, device)
+test_logits_nn = predict_dataloader(nn_model, test_loader, device)
+
+val_rank_lgb_s = rankdata(val_preds_shallow) / len(val_preds_shallow)
+test_rank_lgb_s = rankdata(test_preds_shallow) / len(test_preds_shallow)
+val_rank_shallow = val_rank_lgb_s
+test_rank_shallow = test_rank_lgb_s
+
+val_rank_lgb_m = rankdata(val_preds_mid) / len(val_preds_mid)
+test_rank_lgb_m = rankdata(test_preds_mid) / len(test_preds_mid)
+val_rank_goss = val_rank_lgb_m
+test_rank_goss = test_rank_lgb_m
+
+val_rank_lgb_d = rankdata(val_preds_deep) / len(val_preds_deep)
+test_rank_lgb_d = rankdata(test_preds_deep) / len(test_preds_deep)
+val_rank_dart = val_rank_lgb_d
+test_rank_dart = test_rank_lgb_d
+val_rank_deep = val_rank_lgb_d
+test_rank_deep = test_rank_lgb_d
+
+val_rank_xgb_s = rankdata(val_preds_xgb_shallow) / len(val_preds_xgb_shallow)
+test_rank_xgb_s = rankdata(test_preds_xgb_shallow) / len(test_preds_xgb_shallow)
+
+val_rank_xgb_m = rankdata(val_preds_xgb_mid) / len(val_preds_xgb_mid)
+test_rank_xgb_m = rankdata(test_preds_xgb_mid) / len(test_preds_xgb_mid)
+
+val_rank_xgb_d = rankdata(val_preds_xgb_deep) / len(val_preds_xgb_deep)
+test_rank_xgb_d = rankdata(test_preds_xgb_deep) / len(test_preds_xgb_deep)
+
+val_rank_xgb_d5 = val_rank_xgb_s
+test_rank_xgb_d5 = test_rank_xgb_s
+
+val_rank_nn = rankdata(val_logits_nn) / len(val_logits_nn)
+test_rank_nn = rankdata(test_logits_nn) / len(test_logits_nn)
+
+print(
+    f"Validation AP -> "
+    f"LGB Leaf-80 Exact (pos_weight=1.2): {average_precision_score(y_val, val_rank_lgb_s):.5f}, "
+    f"LGB Mid d=7 Exact (pos_weight=2.0): {average_precision_score(y_val, val_rank_lgb_m):.5f}, "
+    f"LGB Deep d=8 Exact (pos_weight=1.5): {average_precision_score(y_val, val_rank_lgb_d):.5f}, "
+    f"XGB Shallow d=6 (pos_weight=1.2): {average_precision_score(y_val, val_rank_xgb_s):.5f}, "
+    f"XGB Mid d=7 (pos_weight=2.0): {average_precision_score(y_val, val_rank_xgb_m):.5f}, "
+    f"XGB Deep d=8 (pos_weight=1.5): {average_precision_score(y_val, val_rank_xgb_d):.5f}, "
+    f"Tabular ResNet Pure Focal: {average_precision_score(y_val, val_rank_nn):.5f}"
+)
+
+# Unconstrained multi-scale coordinate simplex search targeting validation Average Precision across 7 models
+print("Optimizing decorrelated 7-model ensemble weights on holdout validation Average Precision...")
+val_ranks = [
+    val_rank_lgb_s,
+    val_rank_lgb_m,
+    val_rank_lgb_d,
+    val_rank_xgb_s,
+    val_rank_xgb_m,
+    val_rank_xgb_d,
+    val_rank_nn,
+]
+test_ranks = [
+    test_rank_lgb_s,
+    test_rank_lgb_m,
+    test_rank_lgb_d,
+    test_rank_xgb_s,
+    test_rank_xgb_m,
+    test_rank_xgb_d,
+    test_rank_nn,
+]
+
+w_names = [
+    "LGB Leaf-80 Exact (pos_weight=1.2)",
+    "LGB Mid d=7 Exact (pos_weight=2.0)",
+    "LGB Deep d=8 Exact (pos_weight=1.5)",
+    "XGB Shallow d=6 (pos_weight=1.2)",
+    "XGB Mid d=7 (pos_weight=2.0)",
+    "XGB Deep d=8 (pos_weight=1.5)",
+    "Tabular ResNet Pure Focal",
+]
+
+# Find best starting point from individual models and family blends
+best_score = -1.0
+best_weights = np.ones(7, dtype=np.float64) / 7.0
+
+for idx in range(7):
+    init_w = np.zeros(7, dtype=np.float64)
+    init_w[idx] = 1.0
+    sc = average_precision_score(y_val, val_ranks[idx])
+    if sc > best_score:
+        best_score = sc
+        best_weights = init_w.copy()
+
+# Multi-scale coordinate descent without artificial per-model floors
+step_deltas = [0.08, 0.04, 0.02, 0.01, 0.005, 0.002, 0.001]
+for delta in step_deltas:
+    improved = True
+    while improved:
+        improved = False
+        for i in range(7):
+            for j in range(7):
+                if i == j:
+                    continue
+                cand_w = best_weights.copy()
+                cand_w[i] += delta
+                cand_w[j] -= delta
+                if cand_w[j] < 0.0:
+                    continue
+                cand_w = cand_w / np.sum(cand_w)
+                cand_blend = sum(w * r for w, r in zip(cand_w, val_ranks))
+                sc = average_precision_score(y_val, cand_blend)
+                if sc > best_score:
+                    best_score = sc
+                    best_weights = cand_w
+                    improved = True
+
+print("Optimal 7-way ensemble weights:")
+for name, w in zip(w_names, best_weights):
+    print(f"  {name}: {w:.4f}")
+print(f"Optimized Holdout Validation AP: {best_score:.5f}")
+
+final_score = best_score
+final_test_scores = sum(w * r for w, r in zip(best_weights, test_ranks))
+
+# ---------------------------------------------------------
+# 11. SUBMISSION GENERATION & VALIDATION CHECKS
+# ---------------------------------------------------------
+submission_df = pd.DataFrame(
+    {"bbl": df_test["bbl_str"].values, "score": final_test_scores}
+)
+submission_df.to_csv("submission/submission.csv", index=False)
+
+assert (
+    len(submission_df) == 171587
+), f"Expected 171587 test samples, found {len(submission_df)}"
+assert (
+    submission_df["score"].isna().sum() == 0
+), "Detected NaN values in test prediction scores!"
+assert (
+    submission_df["bbl"].isna().sum() == 0
+), "Detected NaN values in submission BBL identifiers!"
+assert (
+    submission_df["bbl"].str.len() == 10
+).all(), "Malformed BBL identifiers detected!"
+
+print(f"Final Validation Score: {final_score}")
