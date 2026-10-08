@@ -31,10 +31,10 @@ iteration, and what it kept.
 The new agent-visible GCS bucket is `gs://mle-trajectories-data`, with prefixes
 matching the dataset folders. Four Kaggle datasets keep their original train/test splits; UK housing has a
 versioned temporal test with private labels. UK housing, NYC taxi, S6E7,
-December 2021 and APTOS are verified.
+December 2021 and APTOS are verified. TrackTheTrackers inputs are also verified;
+its scorer and held-out labels are in the private bucket.
 See [GCS setup, upload, and direct reads](infra/README.md).
-NYC housing keeps its existing GCS lake; BEAVER and multi-table CoverType are skipped,
-and TrackTheTrackers is deferred.
+NYC housing keeps its existing GCS lake; BEAVER and multi-table CoverType are skipped.
 
 Pipelines read `./input/...`, and both `skrubify --run-in` and
 `pipeline_analyzer.runtime --run-in` take the directory *holding* that `input/`.

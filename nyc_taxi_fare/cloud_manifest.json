@@ -1,0 +1,23 @@
+{
+  "dataset": "nyc_taxi_fare",
+  "data": "gs://mle-trajectories-data/nyc_taxi_fare/input",
+  "verified": true,
+  "files": {
+    "train.csv.gz": {
+      "bytes": 2037726792,
+      "crc32c": "94mlWQ==",
+      "generation": 1791488180994185
+    },
+    "test.csv": {
+      "bytes": 983020,
+      "crc32c": "ob6aag==",
+      "generation": 1791479352273159
+    },
+    "sample_submission.csv": {
+      "bytes": 343271,
+      "crc32c": "e+MuoQ==",
+      "generation": 1791479343255400
+    }
+  },
+  "total_bytes": 2039053083
+}

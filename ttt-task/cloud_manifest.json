@@ -1,0 +1,43 @@
+{
+  "dataset": "ttt-task",
+  "data": "gs://mle-trajectories-data/ttt-task/input",
+  "verified": true,
+  "files": {
+    "tracking_graph_train.parquet": {
+      "bytes": 194918712,
+      "crc32c": "Q7DN1w==",
+      "generation": 1791488745538430
+    },
+    "target.tsv": {
+      "bytes": 437240,
+      "crc32c": "gCcCfw==",
+      "generation": 1791488738238245
+    },
+    "trackers.tsv": {
+      "bytes": 20735,
+      "crc32c": "EqdHjQ==",
+      "generation": 1791488738082702
+    },
+    "domains.parquet": {
+      "bytes": 629154341,
+      "crc32c": "0vyWdg==",
+      "generation": 1791488759291603
+    },
+    "link-graph.parquet": {
+      "bytes": 2977660282,
+      "crc32c": "zl+S3g==",
+      "generation": 1791488790704213
+    },
+    "url-classification.csv": {
+      "bytes": 82721070,
+      "crc32c": "DUMUuw==",
+      "generation": 1791488744799117
+    },
+    "freedom-of-the-press.csv": {
+      "bytes": 759,
+      "crc32c": "BMBfqw==",
+      "generation": 1791488738064546
+    }
+  },
+  "total_bytes": 3884913139
+}

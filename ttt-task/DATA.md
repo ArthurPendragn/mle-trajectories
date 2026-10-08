@@ -36,28 +36,37 @@ ignored, and a domain with no predicted rows scores 0.
 
 ## Full data on this machine
 
-Two complete copies, ~3.8 GB each:
+Verified cloud inputs: `gs://mle-trajectories-data/ttt-task/input`.
+See [CLOUD.md](CLOUD.md) for direct reads and private scoring locations.
+
+The canonical local copy is under `~/datasets`, with seven inputs totalling
+3,884,913,139 bytes:
 
 ```
 ~/datasets/trackthetrackers-task/data/          + TASK.md, scoring/score.py,
                                                   scoring/target_with_labels.tsv
-~/repos/mle-star/machine_learning_engineering/tasks/trackthetrackers-task/
 ```
 
 Note the first nests the files under `data/`, not `input/`, so link or copy the
 *contents*. `ttt-task/input/` is **already populated on this machine** with
-symlinks to the second copy:
+symlinks to `~/datasets/trackthetrackers-task/data/`:
 
 ```bash
 mkdir -p ttt-task/input
-ln -sfn ~/repos/mle-star/machine_learning_engineering/tasks/trackthetrackers-task/*.{parquet,tsv,csv} \
-    ttt-task/input/
+for name in tracking_graph_train.parquet target.tsv trackers.tsv domains.parquet \
+    link-graph.parquet url-classification.csv freedom-of-the-press.csv; do
+    ln -sfn "$HOME/datasets/trackthetrackers-task/data/$name" "ttt-task/input/$name"
+done
 ```
 
 `pipeline_analyzer.runtime` checks for dangling symlinks under `input/` and warns
 before spending a sweep discovering them
-(`tools/pipeline_analyzer/runtime.py:398-403`), so if that mle-star checkout
+(`tools/pipeline_analyzer/runtime.py:398-403`), so if that dataset directory
 moves, the breakage is reported rather than hit at read time.
+
+The original scorer and held-out labels remain outside the repository under
+`~/datasets/trackthetrackers-task/scoring/`; their cloud copies are maintainer-only
+at `gs://mle-trajectories-private/ttt-task/scoring/`.
 
 ## Sampling
 
