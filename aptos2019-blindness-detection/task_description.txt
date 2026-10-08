@@ -1,0 +1,67 @@
+Imagine being able to detect blindness before it happened.
+
+Millions of people suffer from diabetic retinopathy, the leading cause of blindness among working aged adults. Aravind Eye Hospital in India hopes to detect and prevent this disease among people living in rural areas where medical screening is difficult to conduct. Currently, Aravind technicians travel to these rural areas to capture images and then rely on highly trained doctors to review the images and provide diagnosis.
+
+You are provided with a large set of retina images taken using fundus photography under a variety of imaging conditions. A clinician has rated each image for the severity of diabetic retinopathy on a scale of 0 to 4:
+
+0 - No DR
+1 - Mild
+2 - Moderate
+3 - Severe
+4 - Proliferative DR
+
+Like any real-world data set, you will encounter noise in both the images and labels. Images may contain artifacts, be out of focus, underexposed, or overexposed. The images were gathered from multiple clinics using a variety of cameras over an extended period of time, which will introduce further variation.
+
+Your task is to predict the diagnosis (0 to 4) for each image in the test set.
+
+Evaluation
+
+Submissions are scored based on the quadratic weighted kappa, which measures the agreement between two ratings. This metric typically varies from 0 (random agreement between raters) to 1 (complete agreement between raters). In the event that there is less agreement between the raters than expected by chance, this metric may go below 0. The quadratic weighted kappa is calculated between the scores assigned by the human rater and the predicted scores.
+
+Images have five possible ratings, 0,1,2,3,4. Each image is characterized by a tuple (e_A, e_B), which corresponds to its scores by Rater A (human) and Rater B (predicted). The quadratic weighted kappa is calculated as follows. First, an N x N histogram matrix O is constructed, such that O_i,j corresponds to the number of images that received a rating i by A and a rating j by B. An N-by-N matrix of weights, w, is calculated based on the difference between raters' scores:
+
+w_i,j = (i - j)^2 / (N - 1)^2
+
+An N-by-N histogram matrix of expected ratings, E, is calculated, assuming that there is no correlation between rating scores. This is calculated as the outer product between each rater's histogram vector of ratings, normalized such that E and O have the same sum.
+
+From these three matrices, the quadratic weighted kappa is calculated as:
+
+kappa = 1 - (sum_i,j w_i,j O_i,j) / (sum_i,j w_i,j E_i,j)
+
+Submission Format
+
+For each id_code in the test set, you must predict a value for the diagnosis variable. The file should contain a header and have the following format:
+
+id_code,diagnosis
+0005cfc8afb6,0
+003f0afdcd15,0
+etc.
+
+Data Files
+
+The dataset is stored in Google Cloud Storage at:
+gs://mle-trajectories-data/aptos2019-blindness-detection/input
+
+All file and directory names below are relative to this GCS root. Read the data
+directly from GCS using the agent reader's credentials. Python libraries require
+reader Application Default Credentials (ADC); a gcloud CLI login alone does not
+configure Python ADC.
+
+train.csv - the training labels (id_code, diagnosis)
+test.csv - the test set (id_code); you must predict the diagnosis for each id_code
+sample_submission.csv - a sample submission file in the correct format
+train_images/ - the training images (<id_code>.png)
+test_images/ - the test images (<id_code>.png)
+
+Example Python reads with reader ADC:
+
+import pandas as pd
+import fsspec
+from PIL import Image
+
+DATA_ROOT = "gs://mle-trajectories-data/aptos2019-blindness-detection/input"
+train = pd.read_csv(f"{DATA_ROOT}/train.csv")
+test = pd.read_csv(f"{DATA_ROOT}/test.csv")
+image_id = train.loc[0, "id_code"]
+with fsspec.open(f"{DATA_ROOT}/train_images/{image_id}.png", "rb") as stream:
+    image = Image.open(stream).convert("RGB")

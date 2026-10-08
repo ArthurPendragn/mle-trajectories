@@ -1,6 +1,7 @@
 label = "TrackTheTrackers"
 task = "multi-label ranking: predict up to 10 tracker ids per domain"
-note = "See DATA.md."
+data = "gs://mle-trajectories-data/ttt-task/input"
+note = "Original TrackTheTrackers inputs on GCS; scorer and held-out labels are maintainer-only in the private bucket. See CLOUD.md and DATA.md."
 
 [metric]
 name = "recall@10"

@@ -16,6 +16,7 @@ use the existing reader profile on the agent machine.
 | playground-series-s6e7 | `gs://mle-trajectories-data/playground-series-s6e7/input` | Original Kaggle test | Verified |
 | tab_playground_dec_21 | `gs://mle-trajectories-data/tab_playground_dec_21/input` | Original Kaggle test | Verified |
 | aptos2019-blindness-detection | `gs://mle-trajectories-data/aptos2019-blindness-detection/input` | Original Kaggle test | Verified |
+| ttt-task | `gs://mle-trajectories-data/ttt-task/input` | Original held-out targets; private scorer and labels | Verified |
 
 Publication is complete only when the dataset has `cloud_manifest.json` with
 `verified: true`; the website's `dataset.toml` data URI is updated after that
@@ -24,8 +25,9 @@ December 2021 and NYC taxi publish `train.csv.gz`; S6E7 publishes `train.csv`. G
 only storage encoding. All use the original `test.csv` and `sample_submission.csv`.
 APTOS publishes the original CSVs plus 3,662 training and 1,928 test PNGs under
 `train_images/` and `test_images/` (5,593 files, 10.217 GB total).
-NYC housing keeps its existing lake. TrackTheTrackers is deferred; BEAVER and
-multi-table CoverType are excluded.
+TrackTheTrackers publishes its seven original inputs (3.885 GB); its scorer and
+held-out labels are in the private bucket. NYC housing keeps its existing lake.
+BEAVER and multi-table CoverType are excluded.
 
 ## Publish and verify
 
@@ -83,6 +85,43 @@ uv run python infra/verify_upload.py nyc_taxi_fare --gzip-train \
 root; `nyc_taxi_fare/dataset.toml` points to the verified input prefix. Direct
 pandas reads of the gzip training CSV and test CSV passed with the reader
 profile. Historical pipelines retain their original local CSV inputs.
+
+## TrackTheTrackers
+
+Verified inputs are at `gs://mle-trajectories-data/ttt-task/input`; the original
+task description, cloud instructions and public verification manifest are at
+the dataset's cloud root. The seven local input symlinks point to
+`~/datasets/trackthetrackers-task/data/`. Uploading follows those symlinks:
+
+```bash
+uv run python infra/upload_dataset.py ttt-task --upload --workers 8
+uv run python infra/verify_upload.py ttt-task --input ttt-task/input \
+  --prefix gs://mle-trajectories-data/ttt-task/input \
+  --out ttt-task/cloud_manifest.json
+```
+
+The unchanged `score.py` and `target_with_labels.tsv` are verified at
+`gs://mle-trajectories-private/ttt-task/scoring/` (3,294,879 bytes total).
+Their separate verification manifest stays at
+`gs://mle-trajectories-private/ttt-task/cloud_manifest.json`. The agent reader
+was denied access to all three private objects; direct reader TSV and Parquet
+reads of the public inputs passed. Hidden labels cover exactly the 50,000 target
+domains, none of which appear in the labelled training graph.
+
+For maintainer scoring, download only those two files outside the agent workspace
+and run the original scorer. Its labels argument defaults to the adjacent TSV:
+
+```bash
+ttt_scoring_dir="$(mktemp -d)"
+CLOUDSDK_CONFIG="$HOME/.config/gcloud-maint" gcloud storage cp \
+  gs://mle-trajectories-private/ttt-task/scoring/score.py \
+  gs://mle-trajectories-private/ttt-task/scoring/target_with_labels.tsv \
+  "$ttt_scoring_dir/"
+uv run python "$ttt_scoring_dir/score.py" /path/to/predictions.tsv
+```
+
+The original local scoring files remain under
+`~/datasets/trackthetrackers-task/scoring/`, outside this repository.
 
 ## UK housing v1
 
