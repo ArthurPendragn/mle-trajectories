@@ -15,13 +15,16 @@ use the existing reader profile on the agent machine.
 | nyc_taxi_fare | `gs://mle-trajectories-data/nyc_taxi_fare/input` | Original Kaggle test | Paused; see resume instructions below |
 | playground-series-s6e7 | `gs://mle-trajectories-data/playground-series-s6e7/input` | Original Kaggle test | Verified |
 | tab_playground_dec_21 | `gs://mle-trajectories-data/tab_playground_dec_21/input` | Original Kaggle test | Verified |
+| aptos2019-blindness-detection | `gs://mle-trajectories-data/aptos2019-blindness-detection/input` | Original Kaggle test | Verified |
 
 Publication is complete only when the dataset has `cloud_manifest.json` with
 `verified: true`; the website's `dataset.toml` data URI is updated after that
-verification. The three Kaggle datasets retain their original train/test splits. December
+verification. The four Kaggle datasets retain their original train/test splits. December
 2021 and NYC taxi publish `train.csv.gz`; S6E7 publishes `train.csv`. Gzip changes
 only storage encoding. All use the original `test.csv` and `sample_submission.csv`.
-NYC housing keeps its existing lake. TrackTheTrackers and APTOS are deferred; BEAVER and
+APTOS publishes the original CSVs plus 3,662 training and 1,928 test PNGs under
+`train_images/` and `test_images/` (5,593 files, 10.217 GB total).
+NYC housing keeps its existing lake. TrackTheTrackers is deferred; BEAVER and
 multi-table CoverType are excluded.
 
 ## Publish and verify

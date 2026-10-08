@@ -29,12 +29,12 @@ iteration, and what it kept.
 ## Data
 
 The new agent-visible GCS bucket is `gs://mle-trajectories-data`, with prefixes
-matching the dataset folders. Three Kaggle datasets keep their original train/test splits; UK housing has a
-versioned temporal test with private labels. UK housing, S6E7 and December 2021 are verified;
+matching the dataset folders. Four Kaggle datasets keep their original train/test splits; UK housing has a
+versioned temporal test with private labels. UK housing, S6E7, December 2021 and APTOS are verified;
 NYC taxi's upload is paused for resumption on a faster connection.
 See [GCS setup, upload, and direct reads](infra/README.md).
 NYC housing keeps its existing GCS lake; BEAVER and multi-table CoverType are skipped,
-and TrackTheTrackers and APTOS are deferred.
+and TrackTheTrackers is deferred.
 
 Pipelines read `./input/...`, and both `skrubify --run-in` and
 `pipeline_analyzer.runtime --run-in` take the directory *holding* that `input/`.
@@ -74,7 +74,7 @@ sampled number was measured on.
 
 ## Corpus
 
-9 datasets, 25 agent runs, **1216 pipelines** in total. One pipeline = one script
+9 datasets, 27 agent runs, **1322 pipelines** in total. One pipeline = one script
 the agent actually executed. Skrubified rewrites (`skrubify*/`) are the same
 pipeline expressed as a skrub DataOps plan, so they are not counted again.
 
@@ -90,7 +90,9 @@ pipeline expressed as a skrub DataOps plan, so they are not counted again.
 | cover_type_multi_table | mle_star_run_2 | MLE-STAR | 2 | 28 | 5 | 3 | **38** |
 | house_price | mlevolve_run_1 | mlevolve | – | 13 | – | – | **13** |
 | house_price | mlevolve_run_2 | mlevolve | – | 46 | – | – | **46** |
+| nyc-housing-violation | mlevolve_run_0 | mlevolve | – | 18 | – | – | **18** |
 | nyc-housing-violation | mlevolve_run_1 | mlevolve | – | 17 | – | – | **17** |
+| nyc-housing-violation | mlevolve_run_2 | mlevolve | – | 88 | – | – | **88** |
 | nyc-housing-violation | mle-claude-run1 | Claude Code | – | 32 | – | – | **32** |
 | nyc-housing-violation | mle-claude-run1_v2 | Claude Code | – | (32) | – | – | **(32)** |
 | nyc_taxi_fare | mlevolve_run_1 | mlevolve | – | 21 | – | – | **21** |
@@ -106,11 +108,11 @@ pipeline expressed as a skrub DataOps plan, so they are not counted again.
 | ttt-task | mle-claude-run1 | Claude Code | – | 15 | – | – | **15** |
 | ttt-task | mle-claude-run2 | Claude Code | – | 13 | 3 | – | **16** |
 | ttt-task | mle-claude-run3 | Claude Code | – | 14 | 2 | – | **16** |
-| | | | **30** | **988** | **180** | **18** | **1216** |
+| | | | **30** | **1094** | **180** | **18** | **1322** |
 
 Runs per dataset: beaver_enroll 4, aptos2019-blindness-detection 2,
 cover_type_multi_table 2, house_price 2,
-nyc-housing-violation 2 (one mlevolve, one Claude Code, plus the v2 rewrite of the latter),
+nyc-housing-violation 4 (three mlevolve, one Claude Code, plus the v2 rewrite of the latter),
 nyc_taxi_fare 3,
 playground-series-s6e7 1,
 tab_playground_dec_21 2 (one MLE-STAR, one Claude Code),
@@ -120,14 +122,16 @@ Notes on the counts:
 
 - The ablation column is MLE-STAR's ablation scripts — runnable variants of the
   current solution, but probes rather than candidate solutions. Drop them and
-  the corpus is 1036 pipelines.
+  the corpus is 1142 pipelines.
 - mlevolve keeps a script only for nodes that ran; its journals hold 31 nodes
   against 21 saved scripts (nyc_taxi_fare), 31 against 24
   (playground-series-s6e7), 16 against 12 (ttt-task run 1), 35 against 19
   (ttt-task run 2), 11 against 8 (ttt-task run 3), 16 against 13
   (house_price run 1), 51 against 46 (house_price run 2), and 21 against 17
   and 21 against 18 (nyc_taxi_fare runs 2 and 3), and 101 against 81
-  (ttt-task run 4), and 21 against 17 (nyc-housing-violation run 1).
+  (ttt-task run 4), 21 against 18 (nyc-housing-violation run 0), 21 against 17
+  (nyc-housing-violation run 1), and 101 against 88 (nyc-housing-violation
+  run 2).
 - `nyc_taxi_fare` run 1 saw an anonymised description of the task
   (`od_cost_regression`, with `record_id`, `cost`, `origin_x/y`); runs 2 and 3
   saw the un-anonymised one naming New York City taxi fares. Same data and

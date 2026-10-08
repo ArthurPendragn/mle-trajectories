@@ -1,6 +1,7 @@
 label = "APTOS 2019 blindness detection"
 task = "image classification, 5 ordinal grades"
-note = "Kaggle competition; fetch with get_data.sh."
+data = "gs://mle-trajectories-data/aptos2019-blindness-detection/input"
+note = "Original Kaggle CSVs and PNG images on GCS; hidden evaluation uses Kaggle. get_data.sh retains local acquisition."
 
 [metric]
 name = "quadratic weighted kappa"
