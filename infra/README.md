@@ -12,15 +12,15 @@ use the existing reader profile on the agent machine.
 | Dataset | Input URI | Evaluation | Status |
 | --- | --- | --- | --- |
 | house_price | `gs://mle-trajectories-data/house_price/v1/input` | Custom temporal test; private labels | Verified |
-| nyc_taxi_fare | `gs://mle-trajectories-data/nyc_taxi_fare/input` | Original Kaggle test | Paused; see resume instructions below |
+| nyc_taxi_fare | `gs://mle-trajectories-data/nyc_taxi_fare/input` | Original Kaggle test | Verified |
 | playground-series-s6e7 | `gs://mle-trajectories-data/playground-series-s6e7/input` | Original Kaggle test | Verified |
 | tab_playground_dec_21 | `gs://mle-trajectories-data/tab_playground_dec_21/input` | Original Kaggle test | Verified |
 | aptos2019-blindness-detection | `gs://mle-trajectories-data/aptos2019-blindness-detection/input` | Original Kaggle test | Verified |
 
 Publication is complete only when the dataset has `cloud_manifest.json` with
 `verified: true`; the website's `dataset.toml` data URI is updated after that
-verification. The four Kaggle datasets retain their original train/test splits. December
-2021 and NYC taxi publish `train.csv.gz`; S6E7 publishes `train.csv`. Gzip changes
+verification. The four Kaggle datasets retain their original train/test splits.
+December 2021 and NYC taxi publish `train.csv.gz`; S6E7 publishes `train.csv`. Gzip changes
 only storage encoding. All use the original `test.csv` and `sample_submission.csv`.
 APTOS publishes the original CSVs plus 3,662 training and 1,928 test PNGs under
 `train_images/` and `test_images/` (5,593 files, 10.217 GB total).
@@ -63,29 +63,26 @@ Interrupted large uploads retain completed parts. The uploader prints their
 file with each retained part checked against the local bytes. Use `--workers 8`
 on a slow uplink. Successful transfers remove their staging objects.
 
-### Paused NYC taxi upload
+### NYC taxi publication
 
-Stopped on 2026-10-08 at the user's request. The original local files and
-`nyc_taxi_fare/input/train.csv.gz` are intact. 188 completed 4 MiB parts
-(788,529,152 bytes) remain in `_uploads/4e9bfa9607c84dc08f43987b264a3e5a`.
-The final training object does not exist yet; the website manifest still says
-local. Test and sample-submission files are already uploaded.
+Verified on 2026-10-08: 55,423,856 labelled training rides and 9,914 test rides,
+with the unchanged original Kaggle split. The three input files total
+2,039,053,083 bytes. The resumed upload reused 188 checksum-validated parts;
+successful composition and verification removed its staging objects.
 
-From this checkout on a faster connection:
+To verify the published inputs against a local gzip copy:
 
 ```bash
-uv run python infra/upload_dataset.py nyc_taxi_fare --gzip-train --upload \
-  --workers 8 --resume-train-parts _uploads/4e9bfa9607c84dc08f43987b264a3e5a
 uv run python infra/verify_upload.py nyc_taxi_fare --gzip-train \
   --input nyc_taxi_fare/input \
   --prefix gs://mle-trajectories-data/nyc_taxi_fare/input \
   --out nyc_taxi_fare/cloud_manifest.json
 ```
 
-After verification succeeds, publish `CLOUD.md` and `cloud_manifest.json`
-under the dataset's cloud root and set `nyc_taxi_fare/dataset.toml`'s `data`
-to `gs://mle-trajectories-data/nyc_taxi_fare/input`. Verify a direct cloud read
-before starting agents. Do not delete the staging prefix before resuming.
+`CLOUD.md` and `cloud_manifest.json` are published under the dataset's cloud
+root; `nyc_taxi_fare/dataset.toml` points to the verified input prefix. Direct
+pandas reads of the gzip training CSV and test CSV passed with the reader
+profile. Historical pipelines retain their original local CSV inputs.
 
 ## UK housing v1
 

@@ -1,6 +1,7 @@
 label = "NYC taxi fare"
 task = "regression"
-note = "Kaggle competition; fetch with get_data.sh."
+data = "gs://mle-trajectories-data/nyc_taxi_fare/input"
+note = "Original Kaggle split on GCS (train.csv.gz); hidden evaluation uses Kaggle. get_data.sh retains local acquisition."
 
 [metric]
 name = "rmse"

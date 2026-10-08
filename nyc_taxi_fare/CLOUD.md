@@ -1,9 +1,5 @@
 # NYC taxi fare data on GCS
 
-Upload is paused as of 2026-10-08; the training object is not yet published.
-See [resume instructions](../infra/README.md#paused-nyc-taxi-upload). This
-dataset is ready only after `cloud_manifest.json` confirms verification.
-
 Input root: `gs://mle-trajectories-data/nyc_taxi_fare/input`.
 The original split has 55,423,856 labelled rides (2009-2015) and 9,914 test rides.
 Files: `train.csv.gz` (gzip of the unchanged original labelled CSV), original
@@ -28,4 +24,5 @@ Use the existing reader ADC. Streaming gzip avoids a persistent local copy,
 but a full scan still transfers the compressed file. `cloud_manifest.json`
 records verified sizes, CRC32C checksums and generations. Local `get_data.sh`
 retains the original acquisition path for historical trajectory scripts.
+All three input files are verified (2,039,053,083 bytes total).
 Source: [Kaggle](https://www.kaggle.com/competitions/new-york-city-taxi-fare-prediction/data).
