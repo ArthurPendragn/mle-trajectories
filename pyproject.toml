@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "catboost>=1.2.10",
-    "gcsfs",           # data-lake runs (nyc-housing-violation) read gs:// -- pinned below
+    "gcsfs",           # datasets and data-lake runs read gs:// -- pinned below
+    "google-cloud-storage>=3.0",  # corpus upload and checksum verification
     "graphviz>=0.21",
     "ipykernel>=7.3.0",
     "kaggle>=2.2.4",
@@ -34,10 +35,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["tools/code_stats", "tools/dataset_sample", "tools/pipeline_analyzer", "tools/skrubify"]
 
-# The default PyPI torch wheel is built against CUDA 13.0, which this machine's
-# driver (12.7) refuses -- torch.cuda.is_available() comes back False and every
-# pipeline silently falls back to CPU. Pin torch to the cu126 index, the same
-# build mle-star uses on this box.
+# Linux x86-64 nodes need CUDA 12.6 for their driver. Other platforms use
+# PyPI's native wheels (including Apple Silicon / MPS on macOS).
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
@@ -46,7 +45,7 @@ explicit = true
 [tool.uv.sources]
 # stratum from the main branch; pinned by commit (uv fetches the rev from any branch)
 stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "c2de0f8e4e4e1a40c544374997f1ae69aed243b4" }
-torch = { index = "pytorch-cu126" }
+torch = { index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 # The gcsfs 2026.8.1 release can deadlock closing a file (prefetcher close ->
 # "Calling sync() from within a running loop"); a data-lake pipeline then hangs
 # forever. Pin the commit with the fix -- the same one mle-claude uses.

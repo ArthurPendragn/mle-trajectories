@@ -1,0 +1,47 @@
+{
+  "dataset": "house_price",
+  "version": "v1",
+  "target": "price",
+  "id_column": "id",
+  "metric": "rmse_log10",
+  "train_rows": 21963349,
+  "test_rows": 525999,
+  "test_slices": {
+    "history": 150901,
+    "future": 375098
+  },
+  "split": {
+    "strategy": "train through 2016; primary test January-June 2017; diagnostic 5% of 2014-2016 sales removed from training",
+    "primary_slice": "future",
+    "diagnostic_slice": "history",
+    "source_rows": 22489348,
+    "limitation": "Curated historical snapshot, not a historical registry-vintage simulation; registration dates unavailable"
+  },
+  "schema": {
+    "id": "String",
+    "price": "Int64",
+    "date": "String",
+    "property_type": "String",
+    "is_new_build": "String",
+    "tenure": "String",
+    "town": "String",
+    "district": "String",
+    "county": "String",
+    "sale_category": "String"
+  },
+  "files": {
+    "input/sample_submission.csv": {
+      "bytes": 15988179,
+      "sha256": "bdf07787172bdf9c5dd9c929bbbea5a0e08d1c87a8740bdd0cc2b3c9dbfcc2cb"
+    },
+    "input/test.csv": {
+      "bytes": 39433863,
+      "sha256": "6c8f842d82cd6f49ad3d851f13fe58c6ce7e333e41920b897dd21820efa667f1"
+    },
+    "input/train.parquet": {
+      "bytes": 381650259,
+      "sha256": "355efaad6b0abfd746eac3c416f86788153025962239b434c4942bcd9e2653ae"
+    }
+  },
+  "train_test_id_overlap": 0
+}

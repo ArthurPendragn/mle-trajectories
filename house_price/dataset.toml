@@ -1,6 +1,7 @@
 label = "UK house prices"
 task = "regression, out-of-time split"
-note = "HM Land Registry price-paid data (see DATA.md)."
+data = "gs://mle-trajectories-data/house_price/v1/input"
+note = "GCS v1: training through 2016, primary hidden test in 2017 and a separate withheld 2014-2016 diagnostic. Historical trajectories used the original split (see DATA.md)."
 
 [metric]
 name = "rmse on log10(price)"

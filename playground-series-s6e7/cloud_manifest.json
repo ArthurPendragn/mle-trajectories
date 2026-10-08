@@ -1,0 +1,23 @@
+{
+  "dataset": "playground-series-s6e7",
+  "data": "gs://mle-trajectories-data/playground-series-s6e7/input",
+  "verified": true,
+  "files": {
+    "train.csv": {
+      "bytes": 62703120,
+      "crc32c": "Kat3EA==",
+      "generation": 1791478724648119
+    },
+    "test.csv": {
+      "bytes": 24572150,
+      "crc32c": "H0OWIA==",
+      "generation": 1791478894048038
+    },
+    "sample_submission.csv": {
+      "bytes": 4436315,
+      "crc32c": "BZyERg==",
+      "generation": 1791478875606859
+    }
+  },
+  "total_bytes": 91711585
+}

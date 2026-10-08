@@ -1,5 +1,17 @@
 # house_price — where the data comes from
 
+## Current cloud benchmark
+
+The new agent task uses `gs://mle-trajectories-data/house_price/v1/input`;
+see [the v1 task](benchmark_v1/TASK.md) and [cloud setup and grading](../infra/README.md).
+It has 21,963,349 training rows through 2016 and 525,999 unlabelled test rows:
+375,098 future sales in 2017 plus 150,901 withheld 2014-2016 sales, scored
+separately. Hidden prices live only in `gs://mle-trajectories-private/house_price/v1/`.
+The local `input/` now holds this new version. The historical layout below
+describes the data used by the recorded trajectories, which had no older holdout.
+
+## Historical trajectory data
+
 Not a Kaggle competition, so there is no `get_data.sh` here. This file records
 what `input/` has to contain and how it was built, because nothing else in the
 repo does.

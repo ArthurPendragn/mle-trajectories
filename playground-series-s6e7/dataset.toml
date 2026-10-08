@@ -1,6 +1,7 @@
 label = "Playground series S6E7"
 task = "classification"
-note = "Kaggle competition; fetch with get_data.sh."
+data = "gs://mle-trajectories-data/playground-series-s6e7/input"
+note = "Original Kaggle train/test files on GCS; hidden evaluation uses Kaggle. get_data.sh retains the local acquisition path."
 
 [metric]
 name = "balanced_accuracy"

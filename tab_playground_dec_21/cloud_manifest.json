@@ -1,0 +1,23 @@
+{
+  "dataset": "tab_playground_dec_21",
+  "data": "gs://mle-trajectories-data/tab_playground_dec_21/input",
+  "verified": true,
+  "files": {
+    "train.csv.gz": {
+      "bytes": 123171196,
+      "crc32c": "ZQ9HRA==",
+      "generation": 1791479863349466
+    },
+    "test.csv": {
+      "bytes": 135209789,
+      "crc32c": "Vt8dQg==",
+      "generation": 1791479262758676
+    },
+    "sample_submission.csv": {
+      "bytes": 10000014,
+      "crc32c": "ojgDRw==",
+      "generation": 1791478928067796
+    }
+  },
+  "total_bytes": 268380999
+}

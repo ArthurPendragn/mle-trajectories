@@ -1,0 +1,23 @@
+{
+  "dataset": "house_price",
+  "data": "gs://mle-trajectories-data/house_price/v1/input",
+  "verified": true,
+  "files": {
+    "train.parquet": {
+      "bytes": 381650259,
+      "crc32c": "EWO9lw==",
+      "generation": 1791479711693190
+    },
+    "test.csv": {
+      "bytes": 39433863,
+      "crc32c": "iGAslg==",
+      "generation": 1791478789207698
+    },
+    "sample_submission.csv": {
+      "bytes": 15988179,
+      "crc32c": "hm/J7g==",
+      "generation": 1791478768737792
+    }
+  },
+  "total_bytes": 437072301
+}
