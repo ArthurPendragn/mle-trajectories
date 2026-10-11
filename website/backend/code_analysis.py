@@ -4,8 +4,9 @@ Fast and data-free: every pipeline file is parsed, never imported, so this runs
 inside the API. Results are cached per file (path, size, mtime) and per
 parent/child pair, so a page load after the first only re-reads changed files.
 
-mle-claude runs are left to the operator analysis: their pipelines are skrub
-plans over shared modules, which the operator DAG describes exactly.
+What a script imports from the run's own modules (mle-claude's ``common.py``,
+``features.py``, ...) is inlined before measuring (``code_stats.inline``), so a
+five-line script over shared helpers is measured with the code it uses.
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ from collections import Counter
 from functools import lru_cache
 from pathlib import Path
 
-from code_stats import analyze_source, compare, normalized
+from code_stats import analyze_source, compare, inline_local, normalized
 from code_stats.diff import REPORTED
 
 from .registry import REPO_ROOT, Run
@@ -28,20 +29,37 @@ def _stamp(path: Path) -> tuple[str, int, int]:
     return str(path), st.st_size, st.st_mtime_ns
 
 
-@lru_cache(maxsize=4096)
-def _features(stamp: tuple[str, int, int]) -> dict:
-    return analyze_source(Path(stamp[0]).read_text(errors="replace"))
+# A script is keyed by its own stamp and the stamps of its run's other files:
+# what it imports from sibling modules (common.py, features.py, ...) is inlined
+# before measuring, so an edit there invalidates it too.
+Key = tuple[tuple[str, int, int], tuple[tuple[str, int, int], ...]]
 
 
 @lru_cache(maxsize=4096)
-def _normalized(stamp: tuple[str, int, int]) -> str | None:
-    return normalized(Path(stamp[0]).read_text(errors="replace"))
+def _source(key: Key) -> tuple[str, dict[str, list[str]]]:
+    own = Path(key[0][0]).read_text(errors="replace")
+    mods = {Path(s[0]).stem: Path(s[0]).read_text(errors="replace") for s in key[1]}
+    return inline_local(own, mods) if mods else (own, {})
 
 
 @lru_cache(maxsize=4096)
-def _diff(parent: tuple[str, int, int], child: tuple[str, int, int]) -> dict:
-    a, b = Path(parent[0]).read_text(errors="replace"), Path(child[0]).read_text(errors="replace")
-    return compare(_features(parent), _features(child), a, b,
+def _features(key: Key) -> dict:
+    text, inlined = _source(key)
+    f = analyze_source(text)
+    if inlined:
+        own = analyze_source(Path(key[0][0]).read_text(errors="replace"))
+        f["inlined"] = {"modules": inlined, "own_loc": own["size"]["loc"]}
+    return f
+
+
+@lru_cache(maxsize=4096)
+def _normalized(key: Key) -> str | None:
+    return normalized(_source(key)[0])
+
+
+@lru_cache(maxsize=4096)
+def _diff(parent: Key, child: Key) -> dict:
+    return compare(_features(parent), _features(child), _source(parent)[0], _source(child)[0],
                    normalized_pair=(_normalized(parent), _normalized(child)))
 
 
@@ -82,16 +100,13 @@ def _rel(p: Path) -> str:
 
 
 def run_code(run: Run) -> dict:
-    if run.agent in ("mle-claude", "nano-mle"):
-        return {"covered_by": "operator analysis",
-                "reason": f"{run.agent} pipelines are skrub plans; the operator "
-                          "explorer and operator statistics describe them exactly."}
     if run.originals is None or not run.originals.files:
         return {"covered_by": None, "reason": "no original scripts in pipelines/"}
 
     files = run.originals.files
     order = [m for m in run.modules if m in files] or sorted(files)
-    stamps = {m: _stamp(files[m]) for m in order}
+    every = {m: _stamp(p) for m, p in files.items()}
+    stamps = {m: (every[m], tuple(v for k, v in sorted(every.items()) if k != m)) for m in order}
     pipelines = [{"name": m, "file": _rel(files[m]), **_features(stamps[m])} for m in order]
 
     diffs = {}
@@ -171,3 +186,57 @@ def _aggregate(pipelines: list[dict]) -> dict:
 
 _KIND_ORDER = {k: i for i, k in enumerate((*REPORTED, "optimizer", "scheduler", "loss", "training",
                                            "data", "layer", "other"))}
+
+
+CUSTOM = "⟨self-defined network⟩"
+
+
+def run_dashboard(run: Run) -> dict | None:
+    """One run's code analysis reduced for the cross-run dashboard: per step its
+    size, change against the parent and score, and per component kind how many
+    of its scripts use each name. ``None`` for runs the analysis does not cover."""
+    code = run_code(run)
+    if code.get("covered_by") is not None or not code.get("pipelines"):
+        return None
+    scores = {s.module: s.score for s in run.steps if s.module}
+    best = run.best()
+    steps = []
+    for p in code["pipelines"]:
+        d = code["diffs"].get(p["name"])
+        steps.append({
+            "name": p["name"], "ok": p["ok"], "loc": p["size"]["loc"],
+            "own_loc": p["inlined"]["own_loc"] if "inlined" in p else None,
+            "cx": p["structure"]["complexity"] if p["ok"] else None,
+            "score": scores.get(p["name"]),
+            "changed": None if d is None else d["lines_changed"],
+            "ratio": None if d is None else d["change_ratio"],
+            "same": None if d is None else d["same_code"],
+            "params": None if d is None else len(d["params_changed"]),
+            "comps": None if d is None else len(d["components_added"]) + len(d["components_removed"]),
+        })
+    ok = [p for p in code["pipelines"] if p["ok"]]
+    # networks the scripts define themselves, folded into one name ("folded") or
+    # models grouped by their library ("family"); a script counts once per name
+    custom = {c["name"] for p in ok for c in p["components"] if c.get("network")}
+    usage: dict[str, Counter] = {}
+    for p in ok:
+        used = {(c["kind"], c["name"], c["lib"]) for c in p["components"] if c["kind"] in REPORTED}
+        for kind, name, _ in {(k, n, None) for k, n, _ in used}:
+            usage.setdefault(kind, Counter())[name] += 1
+        models = [(n, lib) for k, n, lib in used if k == "model"]
+        for name in {CUSTOM if n in custom else n for n, _ in models}:
+            usage.setdefault("model_folded", Counter())[name] += 1
+        for fam in {"custom network" if n in custom else (lib or "?") for n, lib in models}:
+            usage.setdefault("family", Counter())[fam] += 1
+    s = code["summary"]
+    return {
+        "id": run.id, "dataset": run.dataset.name, "dataset_label": run.dataset.label,
+        "run": run.name, "label": run.label, "agent": run.agent,
+        "metric": {"name": run.metric.name, "lower_is_better": run.metric.lower_is_better},
+        "best": None if best is None else best.module,
+        "n": len(code["pipelines"]), "n_ok": len(ok), "steps": steps,
+        "usage": {k: dict(v.most_common()) for k, v in usage.items()},
+        "libraries": {l["name"]: l["n"] for l in s["libraries"]},
+        "metrics": dict(Counter(m for p in ok for m in set(p["metrics"])).most_common()),
+        "gpu": s["gpu"], "shell": s["shell"], "pip": len(s["pip_installs"]) > 0,
+    }

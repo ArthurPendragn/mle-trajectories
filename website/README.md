@@ -203,11 +203,23 @@ vs parent** columns (components added/removed, hyperparameters changed; the full
 comparison in the tooltip). Files read are grouped under their folder, so a
 data lake's prefix shows once.
 
-mle-claude runs are left to the operator analysis: their pipelines are skrub
-plans over shared modules, which the operator DAG describes exactly.
+What a script imports from its run's own modules (mle-claude's `common.py`,
+`features.py`, `nn.py`, ...) is inlined before measuring (`code_stats.inline`),
+each reached definition once, so a five-line skrub plan over shared helpers is
+measured with the code it uses (`*` on its line count). The shared modules exist
+in one version only: an edit to `common.py` mid-run is not visible as a step change.
 
-It runs inside the API, cached per file (path, size, mtime); the API parses
-every run once in a background thread at start (~15 s for the corpus).
+It runs inside the API, cached per file (path, size, mtime, and those of the
+run's other files); the API parses every run once in a background thread at
+start (~50 s for the corpus).
+
+## Global dashboard
+
+`/dashboard` (`/api/dashboard`, `run_dashboard` in `code_analysis.py`) puts every
+run's code analysis side by side, filterable by dataset and agent: change ratio
+CDFs, change and size along the normalised trajectory, a component heatmap
+(models, model library, validation, metrics, imports × dataset / agent / run),
+breadth of the search, script size per run, and a sortable runs table.
 
 ## Operator analysis: background builds and cache
 

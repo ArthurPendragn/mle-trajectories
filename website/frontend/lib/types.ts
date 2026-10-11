@@ -294,6 +294,8 @@ export type CodeFeatures = {
     pandas: Record<string, number>; polars: Record<string, number>;
   };
   other?: { pip_installs: string[]; shell_calls: number; gpu: boolean; seeds: string[]; prints: number };
+  // definitions inlined from the run's own modules (common.py, ...), and the script's own size
+  inlined?: { modules: Record<string, string[]>; own_loc: number };
 };
 
 export type CodeDiff = {
@@ -332,3 +334,23 @@ export type CodeAnalysis = {
   diffs?: Record<string, CodeDiff>;
   summary?: CodeSummary;
 };
+
+// --- cross-run dashboard (backend/code_analysis.py: run_dashboard) ---------- //
+export type DashStep = {
+  name: string; ok: boolean; loc: number; own_loc: number | null; cx: number | null; score: number | null;
+  changed: number | null; ratio: number | null; same: boolean | null;
+  params: number | null; comps: number | null;
+};
+
+export type DashRun = {
+  id: string; dataset: string; dataset_label: string; run: string; label: string;
+  agent: string | null; metric: Metric; best: string | null;
+  n: number; n_ok: number; steps: DashStep[];
+  // kind -> component -> scripts using it; also "model_folded" (self-defined
+  // networks as one name) and "family" (models by library)
+  usage: Record<string, Record<string, number>>;
+  libraries: Record<string, number>; metrics: Record<string, number>;
+  gpu: number; shell: number; pip: boolean;
+};
+
+export type Dashboard = { runs: DashRun[]; skipped: { id: string; agent: string | null; reason: string }[] };

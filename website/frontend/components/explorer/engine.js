@@ -342,17 +342,18 @@ export function createExplorer(root, D, hooks) {
     groupOf = r.groupOf; groupByVid = r.groupByVid;
     var G = r.G;
     G.ids.forEach(function (it) {
-      G.lines[it] = it < N.length ? wrap(N[it].l) : groupLines(groupByVid[it]);
+      G.lines[it] = it < N.length ? wrap(N[it].l) : groupLines(groupByVid[it], pair);
     });
     return G;
   }
 
-  function groupLines(g) {
+  function groupLines(g, pair) {
     var types = {};
     g.members.forEach(function (id) { types[N[id].t] = (types[N[id].t] || 0) + 1; });
     var top = Object.keys(types).sort(function (a, b) { return types[b] - types[a]; })
       .slice(0, 2).map(function (t) { return t.replace(/Op$/, "") + " ×" + types[t]; });
-    return ["⊞ " + g.members.length + " operations"].concat(top);
+    var share = pair ? "" : " (" + memberKey(g.top, null) + "/" + sel.size + ")";
+    return ["⊞ " + g.members.length + " operations" + share].concat(top);
   }
 
   /* The node a view item stands for: itself, or its group's top node. */

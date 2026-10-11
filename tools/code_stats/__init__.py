@@ -4,5 +4,6 @@ between a step and its parent. See README.md."""
 from .analyze import analyze_source, normalized
 from .catalog import KINDS, classify
 from .diff import compare
+from .inline import inline_local
 
-__all__ = ["KINDS", "analyze_source", "classify", "compare", "normalized"]
+__all__ = ["KINDS", "analyze_source", "classify", "compare", "inline_local", "normalized"]
