@@ -34,6 +34,16 @@ python -m code_stats parent.py child.py --diff
 A file that does not parse returns `ok: false` with the error (four beaver
 MLE-STAR files are truncated by the agent).
 
+## Shared modules (`inline_local`)
+
+`inline_local(src, {module: source})` appends to a script the top-level
+definitions it reaches in sibling modules: the names it imports, then
+transitively what those definitions use (across modules too), plus those
+modules' third-party imports, so components resolve. Each definition is
+inlined once, however often it is called. The website applies it to every run
+(a no-op for self-contained scripts), which is what makes mle-claude's short
+skrub plans over `common.py` / `features.py` measurable.
+
 ## What it cannot know
 
 It reads the *written* code: a branch that never runs still counts, a model

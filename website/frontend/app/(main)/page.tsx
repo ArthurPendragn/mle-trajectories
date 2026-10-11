@@ -57,6 +57,7 @@ export default async function CorpusPage() {
       <p className="muted">
         {corpus.datasets.length} datasets · {runs.length} runs · {steps} steps ·
         stratum {shortCommit(corpus.stratum_commit)} ·{" "}
+        <Link href="/dashboard">global dashboard</Link> ·{" "}
         <Link href="/jobs">
           {jobs.n_live > 0 ? `${jobs.n_live} job${jobs.n_live > 1 ? "s" : ""} running` : "jobs"}
         </Link>

@@ -50,6 +50,12 @@ function Detail({ p }: { p: CodeFeatures }) {
   return (
     <div className="code-detail">
       <p className="mono muted small">{p.file}</p>
+      {p.inlined && (
+        <p className="small muted">
+          {p.inlined.own_loc} lines of code in the script itself; inlined:{" "}
+          {Object.entries(p.inlined.modules).map(([m, n]) => <span key={m}><span className="mono">{m}.py</span> ({n.join(", ")}) </span>)}
+        </p>
+      )}
       {comps.length > 0 && (
         <table className="small">
           <thead><tr><th>line</th><th>kind</th><th>component</th><th>parameters</th></tr></thead>
@@ -134,6 +140,9 @@ export function CodeAnalysisView({ data, best, scores }: {
         Read from the agent&apos;s original scripts, without running or importing them
         (<span className="mono">tools/code_stats</span>): what was <i>written</i>, so a branch that never
         ran still counts. Methods are counted by name, limited to names specific to pandas or polars.
+        {data.pipelines.some((p) => p.inlined) && <> What a script imports from the run&apos;s own modules
+          (<span className="mono">common.py</span>, …) is inlined before measuring, each definition once
+          (<span className="muted">*</span> in the table; hover for what).</>}
       </p>
       <p className="code-facts">
         <span><b>{s.n}</b> scripts{s.n_failed > 0 && <span className="partial"> ({s.n_failed} do not parse)</span>}</span>
@@ -250,7 +259,9 @@ export function CodeAnalysisView({ data, best, scores }: {
                 <tr className={`code-row${p.name === best ? " best" : ""}${p.ok ? "" : " muted"}`}
                     onClick={() => setOpen(open === p.name ? null : p.name)}>
                   <td className="mono">{p.name}</td>
-                  <td className="num">{p.size.loc}</td>
+                  <td className="num" title={p.inlined ? `${p.inlined.own_loc} in the script + definitions inlined from ${Object.entries(p.inlined.modules).map(([m, n]) => `${m}.py (${n.join(", ")})`).join("; ")}` : undefined}>
+                    {p.size.loc}{p.inlined && <span className="muted">*</span>}
+                  </td>
                   {p.ok ? <>
                     <td className="num">{p.structure!.complexity}</td>
                     <td className="num">{p.structure!.for + p.structure!.while}</td>

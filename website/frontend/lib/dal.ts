@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { SESSION_COOKIE, decrypt } from "./session";
-import type { ActionsInfo, AnalysisStatus, CodeAnalysis, Corpus, Job, RunDetail, RuntimeProfile, SampleParams,
+import type { ActionsInfo, AnalysisStatus, CodeAnalysis, Corpus, Dashboard, Job, RunDetail, RuntimeProfile, SampleParams,
   JobList, SamplePlan, SweepParams, SweepPlan, TreeData } from "./types";
 
 // Data access layer: the only place that talks to the Python API, and every
@@ -72,6 +72,11 @@ const apiGet = <T,>(route: string) => apiRequest<T>("GET", route);
 export async function getCorpus(): Promise<Corpus> {
   await verifySession();
   return apiGet<Corpus>("/api/corpus");
+}
+
+export async function getDashboard(): Promise<Dashboard> {
+  await verifySession();
+  return apiGet<Dashboard>("/api/dashboard");
 }
 
 function runPath(dataset: string, run: string): string {

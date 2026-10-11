@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException, Response
 
 from . import actions, jobs
-from .code_analysis import run_code, warm
+from .code_analysis import run_code, run_dashboard, warm
 from .registry import (REPO_ROOT, Dataset, Metric, Run, RuntimeStore, Source, StepInfo,
                        TestScores, current_stratum_commit, load_corpus)
 from .runtime_profile import build_profile
@@ -194,6 +194,25 @@ def run_tree(dataset: str, run: str, source: str | None = None) -> dict:
 def run_code_analysis(dataset: str, run: str) -> dict:
     """Static features of the run's original scripts, and what each step changed."""
     return run_code(_find_run(dataset, run))
+
+
+@app.get("/api/dashboard")
+def dashboard() -> dict:
+    """Every run's static code analysis, reduced for the cross-run dashboard."""
+    runs, skipped = [], []
+    for ds in _corpus():
+        for r in ds.runs:
+            try:
+                d = run_dashboard(r)
+            except Exception as exc:   # noqa: BLE001 - one broken run never blanks the page
+                skipped.append({"id": r.id, "agent": r.agent, "reason": f"error: {exc}"})
+                continue
+            if d is None:
+                skipped.append({"id": r.id, "agent": r.agent,
+                                "reason": run_code(r).get("reason") or "not covered"})
+            else:
+                runs.append(d)
+    return {"runs": runs, "skipped": skipped}
 
 
 @app.get("/api/runs/{dataset}/{run}/runtime/{store}")
