@@ -1,0 +1,8 @@
+scored_at = 2026-10-11
+note = "Kaggle public leaderboard (kaggle competitions submit -c spaceship-titanic), accuracy"
+
+[final]                        # the submission written at the end of the run
+score = 0.80336
+pipeline = "pipeline_19"
+file = "submission.csv"
+note = "candidate expansion_3e685ab931dd_variant_2 (CV accuracy 0.8156, 5 stratified folds on 8693 rows), refit by the harness's submission step; Kaggle message mlevolve_run_1"

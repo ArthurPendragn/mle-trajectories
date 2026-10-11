@@ -1,0 +1,3 @@
+agent = "mlevolve"
+label = "mlevolve run 1"
+note = "Gemini 3.8 Flash, 2h, 2 branches on socket 0 (32 CPUs, GPUs 0-1), run in parallel with run 2. 35 nodes, 4 buggy, 30 scripts. Best validation accuracy 0.8219 (agent's own split). Patched CPU pinning: branches get whole physical cores."
