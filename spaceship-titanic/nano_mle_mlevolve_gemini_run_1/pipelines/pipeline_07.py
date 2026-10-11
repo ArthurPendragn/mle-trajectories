@@ -1,0 +1,112 @@
+import numpy as np
+import pandas as pd
+import skrub
+from lightgbm import LGBMClassifier
+from sklearn.ensemble import VotingClassifier
+from sklearn.pipeline import make_pipeline
+from xgboost import XGBClassifier
+
+def build():
+    setup = build_evaluation()
+    X = setup['X']
+    y = setup['y']
+    scoring = setup['scoring']
+
+    cabin_split = X['Cabin'].str.split('/', expand=True)
+    deck = cabin_split[0].astype('string')
+    cabin_num = cabin_split[1].astype('float64')
+    side = cabin_split[2].astype('string')
+    group_num = X['PassengerId'].str[5:].astype('float64')
+
+    room_service_filled = X['RoomService'].fillna(0.0)
+    food_court_filled = X['FoodCourt'].fillna(0.0)
+    shopping_mall_filled = X['ShoppingMall'].fillna(0.0)
+    spa_filled = X['Spa'].fillna(0.0)
+    vr_deck_filled = X['VRDeck'].fillna(0.0)
+
+    service_spend = room_service_filled + spa_filled + vr_deck_filled
+    leisure_spend = food_court_filled + shopping_mall_filled
+    total_spend = service_spend + leisure_spend
+    has_spend = (total_spend > 0.0).astype('float64')
+
+    log_room_service = room_service_filled.skb.apply_func(np.log1p)
+    log_food_court = food_court_filled.skb.apply_func(np.log1p)
+    log_shopping_mall = shopping_mall_filled.skb.apply_func(np.log1p)
+    log_spa = spa_filled.skb.apply_func(np.log1p)
+    log_vr_deck = vr_deck_filled.skb.apply_func(np.log1p)
+    log_service_spend = service_spend.skb.apply_func(np.log1p)
+    log_leisure_spend = leisure_spend.skb.apply_func(np.log1p)
+    log_total_spend = total_spend.skb.apply_func(np.log1p)
+
+    spend_denom = total_spend + 1.0
+    pct_room_service = room_service_filled / spend_denom
+    pct_food_court = food_court_filled / spend_denom
+    pct_shopping_mall = shopping_mall_filled / spend_denom
+    pct_spa = spa_filled / spend_denom
+    pct_vr_deck = vr_deck_filled / spend_denom
+    pct_service = service_spend / spend_denom
+    pct_leisure = leisure_spend / spend_denom
+
+    age_filled = X['Age'].fillna(-1.0)
+    is_child = ((age_filled >= 0.0) & (age_filled <= 12.0)).astype('float64')
+
+    cryo_sleep = X['CryoSleep'].astype('string')
+    vip = X['VIP'].astype('string')
+
+    features = X.assign(
+        RoomService=log_room_service,
+        FoodCourt=log_food_court,
+        ShoppingMall=log_shopping_mall,
+        Spa=log_spa,
+        VRDeck=log_vr_deck,
+        ServiceSpend=log_service_spend,
+        LeisureSpend=log_leisure_spend,
+        TotalSpend=log_total_spend,
+        HasSpend=has_spend,
+        PctRoomService=pct_room_service,
+        PctFoodCourt=pct_food_court,
+        PctShoppingMall=pct_shopping_mall,
+        PctSpa=pct_spa,
+        PctVRDeck=pct_vr_deck,
+        PctService=pct_service,
+        PctLeisure=pct_leisure,
+        IsChild=is_child,
+        Deck=deck,
+        CabinNum=cabin_num,
+        Side=side,
+        GroupNum=group_num,
+        CryoSleep=cryo_sleep,
+        VIP=vip,
+    ).drop(columns=['PassengerId', 'Cabin', 'Name']).skb.set_name('features')
+
+    pipe_lgb = make_pipeline(
+        skrub.TableVectorizer(),
+        LGBMClassifier(
+            n_estimators=500,
+            learning_rate=0.03,
+            num_leaves=31,
+            random_state=42,
+            verbose=-1,
+            n_jobs=8,
+        ),
+    )
+    pipe_xgb = make_pipeline(
+        skrub.TableVectorizer(),
+        XGBClassifier(
+            n_estimators=500,
+            learning_rate=0.03,
+            max_depth=6,
+            random_state=42,
+            eval_metric='logloss',
+            tree_method='hist',
+            n_jobs=8,
+        ),
+    )
+
+    model = VotingClassifier(
+        estimators=[('lgb', pipe_lgb), ('xgb', pipe_xgb)],
+        voting='soft',
+    )
+    pred = features.skb.apply(model, y=y).skb.set_name('model')
+
+    return {'pred': pred, 'scoring': scoring}

@@ -1,0 +1,3 @@
+agent = "nano-mle"
+label = "nano-mle mlevolve profile (Gemini 3.8 Flash, 2h, 8 cores)"
+note = "nano-mle mlevolve search, model gemini/gemini-3.8-flash. 27 scored expansions, 0 failed. Locked accuracy on 8693 rows. Plans read task sources by absolute path."

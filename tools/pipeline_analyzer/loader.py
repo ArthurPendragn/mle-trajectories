@@ -31,7 +31,7 @@ from .dag import Dag, build_dag
 
 # Modules a pipeline file pulls from the workspace; must be re-imported fresh per
 # pipeline so one file's plan never leaks into the next.
-_WORKSPACE_MODULES = ("common", "features", "nn")
+_WORKSPACE_MODULES = ("common", "features", "nn", "evaluation_setup")
 
 
 @dataclass
@@ -68,12 +68,31 @@ def _fresh_import(module_name: str, path: Path):
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
+    _inject_nano_mle_evaluation(mod, path)
     sys.modules[module_name] = mod
     try:
         spec.loader.exec_module(mod)
     finally:
         sys.modules.pop(module_name, None)
     return mod
+
+
+def _inject_nano_mle_evaluation(mod, path: Path) -> None:
+    """nano-mle plans call ``build_evaluation()`` without importing it: its runner
+    runs a plan in the namespace of the locked ``evaluation_setup.py``, with that
+    file's ``build`` as ``build_evaluation``. Plans rely on the rest of it too
+    (``skrub``, ``TRAIN_PATH`` used unimported). Do the same when that file sits
+    beside the plan; the plan's own definitions override."""
+    setup = path.parent / "evaluation_setup.py"
+    if path.stem == "evaluation_setup" or not setup.exists():
+        return
+    spec = importlib.util.spec_from_file_location("evaluation_setup", setup)
+    setup_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup_mod)
+    for k, v in vars(setup_mod).items():
+        if not k.startswith("__"):
+            setattr(mod, k, v)
+    mod.build_evaluation = setup_mod.build
 
 
 def load_pipeline(module_name: str, pipe_dir: Path, *, unroll_choices: bool = False) -> Pipeline:
@@ -117,17 +136,54 @@ def _as_data_op_passthrough():
     node and fails with "Encountered op MethodCallOp(...) which should not exist
     in the DAG" (nano-mle's ``features = skrub.as_data_op(activation_counts)``).
     Dropping the wrapper gives the same computation without the redundant node.
+
+    A container holding DataOps (nano-mle's ``as_data_op((values, (rows, cols)))``)
+    hits the same blind spot, so it becomes a deferred call that rebuilds the
+    container from those DataOps passed as arguments, which stratum does follow.
     """
     original = skrub.as_data_op
 
     def as_data_op(value):
-        return value if isinstance(value, skrub.DataOp) else original(value)
+        if isinstance(value, skrub.DataOp):
+            return value
+        leaves = []
+        template = _template(value, leaves)
+        if not leaves:
+            return original(value)
+        return skrub.deferred(_rebuild)(template, *leaves)
 
     skrub.as_data_op = as_data_op
     try:
         yield
     finally:
         skrub.as_data_op = original
+
+
+class _Leaf:
+    def __init__(self, i):
+        self.i = i
+
+
+def _template(value, leaves):
+    """``value`` with each nested DataOp replaced by a ``_Leaf`` index into ``leaves``."""
+    if isinstance(value, skrub.DataOp):
+        leaves.append(value)
+        return _Leaf(len(leaves) - 1)
+    if isinstance(value, (list, tuple)):
+        return type(value)(_template(v, leaves) for v in value)
+    if isinstance(value, dict):
+        return {k: _template(v, leaves) for k, v in value.items()}
+    return value
+
+
+def _rebuild(template, *values):
+    if isinstance(template, _Leaf):
+        return values[template.i]
+    if isinstance(template, (list, tuple)):
+        return type(template)(_rebuild(t, *values) for t in template)
+    if isinstance(template, dict):
+        return {k: _rebuild(t, *values) for k, t in template.items()}
+    return template
 
 
 def _plan_of(mod, module_name: str):

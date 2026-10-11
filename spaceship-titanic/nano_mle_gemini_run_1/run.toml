@@ -1,0 +1,3 @@
+agent = "nano-mle"
+label = "nano-mle default (LLM controller, greedy, window memory) (Gemini 3.8 Flash, 2h, 8 cores)"
+note = "nano-mle greedy search, model gemini/gemini-3.8-flash. 34 scored expansions, 2 failed. Locked accuracy on 8693 rows. Plans read task sources by absolute path."
