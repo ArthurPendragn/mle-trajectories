@@ -36,9 +36,9 @@ from pathlib import Path
 from dataset_sample._manifest import MANIFEST, fingerprint, is_sample
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-AGENTS = ("mle-star", "mlevolve", "mle-claude", "nano-mle", "aide")
+AGENTS = ("mle-star", "mlevolve", "mle-claude", "meta-mle", "aide")
 # Agents whose pipelines are skrub plans already, with lineage in pipelines/results.json.
-SKRUB_PLAN_AGENTS = ("mle-claude", "nano-mle")
+SKRUB_PLAN_AGENTS = ("mle-claude", "meta-mle")
 TRAJECTORY_FILES = ("final_state.json", "journal_slim.json")
 
 _DATASET_KEYS = {"label", "task", "data", "note", "metric", "defaults", "sample", "prepare"}

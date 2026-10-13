@@ -1,6 +1,6 @@
 label = "Spaceship Titanic"
 task = "Predict whether a passenger was transported to an alternate dimension."
-note = "Kaggle spaceship-titanic, original train/test files; the test labels are hidden (Kaggle scores submissions). nano-mle runs read /home/estrauss-ldap/datasets/space-ship-titanic/input."
+note = "Kaggle spaceship-titanic, original train/test files; the test labels are hidden (Kaggle scores submissions). meta-mle runs read /home/estrauss-ldap/datasets/space-ship-titanic/input."
 
 [metric]
 name = "accuracy"

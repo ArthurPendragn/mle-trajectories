@@ -1,11 +1,11 @@
-"""Import a nano-mle workspace as a run folder in the mle-claude layout.
+"""Import a meta-mle workspace as a run folder in the mle-claude layout.
 
-nano-mle writes skrub plans itself, so its plans are the originals:
+meta-mle writes skrub plans itself, so its plans are the originals:
 
     <dataset>/<run>/
-        run.toml                 agent = "nano-mle"
+        run.toml                 agent = "meta-mle"
         task_description.txt     the task text the agent was given
-        workspace.json, report.md, graph.json   nano-mle's own exports (journal)
+        workspace.json, report.md, graph.json   meta-mle's own exports (journal)
         pipelines/
             pipeline_NN.py       one per scored expansion, its grid included
             results.json         lineage, best-first (same shape as mle-claude's)
@@ -16,7 +16,7 @@ Plans are copied byte for byte. They read the task sources by the absolute paths
 they had during the run.
 
 Usage:
-    python tools/import_nano_mle.py WORKSPACE DATASET_DIR RUN_NAME [--label LABEL]
+    python tools/import_meta_mle.py WORKSPACE DATASET_DIR RUN_NAME [--label LABEL]
 """
 
 import argparse
@@ -55,9 +55,9 @@ def wall_time(attempt):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("workspace", type=Path, help="nano-mle workspace (the directory holding state.db)")
+    parser.add_argument("workspace", type=Path, help="meta-mle workspace (the directory holding state.db)")
     parser.add_argument("dataset", type=Path, help="dataset folder in this repo")
-    parser.add_argument("name", help="run folder name, e.g. nano_mle_sol_run_1")
+    parser.add_argument("name", help="run folder name, e.g. meta_mle_sol_run_1")
     parser.add_argument("--label")
     parser.add_argument("--force", action="store_true", help="replace an existing run folder")
     args = parser.parse_args()
@@ -95,7 +95,7 @@ def main():
                      "score": max(v["score"] for v in variants),
                      "duration_s": wall_time(attempt),
                      "extra": {"grid": grid} if len(grid) > 1 else {},
-                     "nano_mle": {"expansion_id": expansion["id"], "parent_candidate": expansion["parent_id"],
+                     "meta_mle": {"expansion_id": expansion["id"], "parent_candidate": expansion["parent_id"],
                                   "direction": expansion.get("direction"),
                                   "fold_scores": max(variants, key=lambda v: v["score"]).get("fold_scores")}})
     rows.sort(key=lambda r: r["score"], reverse=True)
@@ -117,11 +117,11 @@ def main():
     task = meta(db, "task") or {}
     (out / "task_description.txt").write_text(task.get("description", ""))
     failed = len([e for e in records(db, "expansion") if e.get("status") != "ok"])
-    label = args.label or f"nano-mle ({meta(db, 'model')})"
-    note = (f"nano-mle {meta(db, 'policy')} search, model {meta(db, 'model')}. "
+    label = args.label or f"meta-mle ({meta(db, 'model')})"
+    note = (f"meta-mle {meta(db, 'policy')} search, model {meta(db, 'model')}. "
             f"{len(rows)} scored expansions, {failed} failed. Locked {contract.get('scoring')} on "
             f"{contract.get('rows')} rows. Plans read task sources by absolute path.")
-    (out / "run.toml").write_text(f'agent = "nano-mle"\nlabel = {json.dumps(label)}\nnote = {json.dumps(note)}\n')
+    (out / "run.toml").write_text(f'agent = "meta-mle"\nlabel = {json.dumps(label)}\nnote = {json.dumps(note)}\n')
     print(f"{out}: {len(rows)} pipelines, best {rows[0]['score'] if rows else None}")
 
 

@@ -105,7 +105,7 @@ def build_lineage(pipelines: list[Pipeline], results_path: Path | None = None) -
     nodes: dict[str, LineageNode] = {}
     for p in pipelines:
         r = results.get(p.name, {})
-        # nano-mle plans carry no PARENT/DESCRIPTION; results.json has both
+        # meta-mle plans carry no PARENT/DESCRIPTION; results.json has both
         if p.description is None and r.get("description"):
             p.description = r["description"]
         nodes[p.name] = LineageNode(

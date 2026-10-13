@@ -68,7 +68,7 @@ def _fresh_import(module_name: str, path: Path):
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {path}")
     mod = importlib.util.module_from_spec(spec)
-    _inject_nano_mle_evaluation(mod, path)
+    _inject_meta_mle_evaluation(mod, path)
     sys.modules[module_name] = mod
     try:
         spec.loader.exec_module(mod)
@@ -77,8 +77,8 @@ def _fresh_import(module_name: str, path: Path):
     return mod
 
 
-def _inject_nano_mle_evaluation(mod, path: Path) -> None:
-    """nano-mle plans call ``build_evaluation()`` without importing it: its runner
+def _inject_meta_mle_evaluation(mod, path: Path) -> None:
+    """meta-mle plans call ``build_evaluation()`` without importing it: its runner
     runs a plan in the namespace of the locked ``evaluation_setup.py``, with that
     file's ``build`` as ``build_evaluation``. Plans rely on the rest of it too
     (``skrub``, ``TRAIN_PATH`` used unimported). Do the same when that file sits
@@ -134,10 +134,10 @@ def _as_data_op_passthrough():
     skrub wraps it in a ``Value`` node that evaluates to the inner op's result --
     an identity -- but stratum's ``logical_optimize`` does not look inside such a
     node and fails with "Encountered op MethodCallOp(...) which should not exist
-    in the DAG" (nano-mle's ``features = skrub.as_data_op(activation_counts)``).
+    in the DAG" (meta-mle's ``features = skrub.as_data_op(activation_counts)``).
     Dropping the wrapper gives the same computation without the redundant node.
 
-    A container holding DataOps (nano-mle's ``as_data_op((values, (rows, cols)))``)
+    A container holding DataOps (meta-mle's ``as_data_op((values, (rows, cols)))``)
     hits the same blind spot, so it becomes a deferred call that rebuilds the
     container from those DataOps passed as arguments, which stratum does follow.
     """
@@ -188,7 +188,7 @@ def _rebuild(template, *values):
 
 def _plan_of(mod, module_name: str):
     """The plan's prediction DataOp: a module-level ``pred`` (mle-claude,
-    skrubify), else what ``build()`` returns -- nano-mle plans define
+    skrubify), else what ``build()`` returns -- meta-mle plans define
     ``build() -> {"pred": ..., "scoring": ..., ...}`` and nothing at module level."""
     pred = getattr(mod, "pred", None)
     if pred is None and callable(getattr(mod, "build", None)):
