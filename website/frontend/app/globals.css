@@ -16,8 +16,9 @@
   color-scheme: light;
 }
 
+/* dark: follows the system unless the theme toggle pinned a choice (data-theme on <html>) */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #151517;
     --surface: #1c1c1f;
     --fg: #e8e8ea;
@@ -32,6 +33,22 @@
     --canvas: #e9ebee;
     color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #151517;
+  --surface: #1c1c1f;
+  --fg: #e8e8ea;
+  --muted: #9a9aa0;
+  --border: #2e2e33;
+  --accent: #7ea6ec;
+  --up: #6cc08e;
+  --down: #e58a7a;
+  --warn: #d9ad4f;
+  --best: #1f2b22;
+  --badge: #2a2a2f;
+  --canvas: #e9ebee;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
