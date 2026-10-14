@@ -1,0 +1,8 @@
+scored_at = 2026-10-13
+note = "Kaggle public leaderboard (kaggle competitions submit -c new-york-city-taxi-fare-prediction), RMSE"
+
+[final]                        # the submission written at the end of the run
+score = 3.03955
+pipeline = "pipeline_15"
+file = "submission.csv"
+note = "candidate expansion_17fe71b80f64_variant_1 (CV RMSE 3.7184, 5 folds), refit by the harness's submission step; Kaggle message meta-mle mlevolve-run2_5h_full"

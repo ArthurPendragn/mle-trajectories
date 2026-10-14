@@ -1,0 +1,6 @@
+scored_at = 2026-10-13
+note = "Kaggle public leaderboard (kaggle competitions submit -c new-york-city-taxi-fare-prediction), RMSE"
+
+[final]                        # the submission written at the end of the run
+score = 3.24077
+note = "Kaggle message mlevolve run 2"
