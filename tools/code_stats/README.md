@@ -55,9 +55,10 @@ library (`gc.collect()` is not polars).
 ## Step vs parent (`compare`)
 
 Lines added/removed, **lines changed** (added + removed; a replaced line
-counts twice), the **change ratio** (changed lines on code lines only, blank
-and comment lines dropped, divided by the parent's code lines; above 100% when
-a step adds more than its parent had) and similarity (`difflib` on lines), whether the code is
+counts twice), the **change ratio** (changed lines of the normalized code,
+so comments, blank lines and formatting do not count, divided by the parent's;
+above 100% when a step adds more than its parent had. Falls back to raw code
+lines when a side does not parse) and similarity (`difflib` on lines), whether the code is
 the same once comments and formatting are ignored, components added/removed,
 hyperparameters changed (the i-th occurrence of a component against the i-th
 in the parent; a parameter missing on a side that passes `**kwargs` is not

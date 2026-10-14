@@ -10,6 +10,7 @@ five-line script over shared helpers is measured with the code it uses.
 """
 from __future__ import annotations
 
+import re
 import statistics
 import sys
 from collections import Counter
@@ -189,6 +190,27 @@ _KIND_ORDER = {k: i for i, k in enumerate((*REPORTED, "optimizer", "scheduler", 
 
 
 CUSTOM = "⟨self-defined network⟩"
+# scripts with no recognised model: hand-written scoring rules, heuristics
+NO_MODEL = "⟨unknown / custom⟩"
+
+# one entity per model regardless of task variant or API: LGBMClassifier,
+# LGBMRegressor and lightgbm.train are all LightGBM. Kernels stay apart
+# (HistGradientBoosting is not LightGBM). Unlisted names fall back to their
+# variant suffix stripped, so a new XyzClassifier still merges with XyzRegressor.
+MODEL_ENTITY = {
+    "lightgbm.train": "LightGBM", "LGBMClassifier": "LightGBM", "LGBMRegressor": "LightGBM",
+    "LGBMRanker": "LightGBM",
+    "xgboost.train": "XGBoost", "XGBClassifier": "XGBoost", "XGBRegressor": "XGBoost",
+    "XGBRanker": "XGBoost",
+    "CatBoostClassifier": "CatBoost", "CatBoostRegressor": "CatBoost", "CatBoostRanker": "CatBoost",
+}
+_VARIANT = re.compile(r"(Classifier|Regressor|Ranker)$")
+
+
+def model_entity(name: str) -> str:
+    """The model ``name`` stands for, merged across classification/regression
+    variants and sklearn-wrapper vs native API."""
+    return MODEL_ENTITY.get(name) or _VARIANT.sub("", name) or name
 
 
 def run_dashboard(run: Run) -> dict | None:
@@ -224,14 +246,24 @@ def run_dashboard(run: Run) -> dict | None:
         for kind, name, _ in {(k, n, None) for k, n, _ in used}:
             usage.setdefault(kind, Counter())[name] += 1
         models = [(n, lib) for k, n, lib in used if k == "model"]
+        if not models:
+            for key in ("model", "model_folded", "model_merged", "model_folded_merged", "family"):
+                usage.setdefault(key, Counter())[NO_MODEL] += 1
         for name in {CUSTOM if n in custom else n for n, _ in models}:
             usage.setdefault("model_folded", Counter())[name] += 1
+        # merged after naming, so a script using two variants counts once
+        for name in {model_entity(n) for n, _ in models}:
+            usage.setdefault("model_merged", Counter())[name] += 1
+        for name in {CUSTOM if n in custom else model_entity(n) for n, _ in models}:
+            usage.setdefault("model_folded_merged", Counter())[name] += 1
         for fam in {"custom network" if n in custom else (lib or "?") for n, lib in models}:
             usage.setdefault("family", Counter())[fam] += 1
     s = code["summary"]
     return {
         "id": run.id, "dataset": run.dataset.name, "dataset_label": run.dataset.label,
-        "run": run.name, "label": run.label, "agent": run.agent,
+        "run": run.name, "label": run.label,
+        # the variant is its own agent here: meta-mle's policies search differently
+        "agent": f"{run.agent} · {run.variant}" if run.agent and run.variant else run.agent,
         "metric": {"name": run.metric.name, "lower_is_better": run.metric.lower_is_better},
         "best": None if best is None else best.module,
         "n": len(code["pipelines"]), "n_ok": len(ok), "steps": steps,

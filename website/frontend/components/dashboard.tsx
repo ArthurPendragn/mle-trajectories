@@ -14,6 +14,9 @@ const AGENT_COLORS: Record<string, string> = {
 };
 const SPARE = ["#2a9d8f", "#9b5de5", "#7a9a3a", "#c26bb0"];
 const UNKNOWN = "#8a8a8a";
+const NO_MODEL = "⟨unknown / custom⟩";
+/** names that are real models, without the no-model bucket */
+const modelNames = (u: Record<string, number>) => Object.keys(u).filter((k) => k !== NO_MODEL);
 const agentName = (a: string | null) => a ?? "unknown";
 
 function useAgentColor(agents: string[]) {
@@ -119,14 +122,16 @@ const SOURCES: [Source, string][] = [
 ];
 
 /** scripts of ``r`` using each name of the source; a script counts once per name */
-function usageOf(r: DashRun, src: Source, fold: boolean): Record<string, number> {
+function usageOf(r: DashRun, src: Source, fold: boolean, merge = true): Record<string, number> {
   if (src === "libraries") return r.libraries;
   if (src === "metric") {
     const out: Record<string, number> = { ...r.metrics };
     for (const [k, v] of Object.entries(r.usage.metric ?? {})) out[k] = Math.max(out[k] ?? 0, v);
     return out;
   }
-  return r.usage[src === "model" && fold ? "model_folded" : src] ?? {};
+  if (src !== "model") return r.usage[src] ?? {};
+  const key = fold && merge ? "model_folded_merged" : fold ? "model_folded" : merge ? "model_merged" : "model";
+  return r.usage[key] ?? {};
 }
 
 // --------------------------------------------------------------------------- //
@@ -139,6 +144,7 @@ function Heatmap({ runs, color }: { runs: DashRun[]; color: (a: string | null) =
   const [src, setSrc] = useState<Source>("model");
   const [axis, setAxis] = useState<Axis>("dataset");
   const [fold, setFold] = useState(true);
+  const [merge, setMerge] = useState(true);
   const [top, setTop] = useState(20);
   const [hover, setHover] = useState<string | null>(null);
 
@@ -162,7 +168,7 @@ function Heatmap({ runs, color }: { runs: DashRun[]; color: (a: string | null) =
       let n = 0;
       for (const r of c.runs) {
         n += r.n_ok;
-        for (const [k, v] of Object.entries(usageOf(r, src, fold))) {
+        for (const [k, v] of Object.entries(usageOf(r, src, fold, merge))) {
           m.set(k, (m.get(k) ?? 0) + v);
           tot.set(k, (tot.get(k) ?? 0) + v);
         }
@@ -181,7 +187,7 @@ function Heatmap({ runs, color }: { runs: DashRun[]; color: (a: string | null) =
         return { n, of: den.get(c)!, share: n / Math.max(den.get(c)!, 1) };
       },
     };
-  }, [cols, src, fold]);
+  }, [cols, src, fold, merge]);
 
   const shown = rows.slice(0, top);
   const cw = axis === "run" ? 26 : axis === "agent" ? 90 : 64;
@@ -196,6 +202,9 @@ function Heatmap({ runs, color }: { runs: DashRun[]; color: (a: string | null) =
         <Seg value={axis} set={setAxis} options={[["dataset", "dataset"], ["agent", "agent"], ["run", "run"]]} />
         {src === "model" && <label className="small"><input type="checkbox" checked={fold}
           onChange={(e) => setFold(e.target.checked)} /> fold self-defined networks</label>}
+        {src === "model" && <label className="small" title="LGBMClassifier, LGBMRegressor and lightgbm.train count as one LightGBM; different kernels (HistGradientBoosting vs LightGBM) stay apart">
+          <input type="checkbox" checked={merge}
+          onChange={(e) => setMerge(e.target.checked)} /> merge variants</label>}
       </>}>
       <div className="table-scroll">
         <table className="dash-heat small">
@@ -280,7 +289,7 @@ function CdfPanel({ runs, color, agents }: { runs: DashRun[]; color: (a: string 
 
   return (
     <Panel title="How much each step changes"
-      note={<>Empirical CDF of the ratio of changed code lines against the parent, over every parent → child step.
+      note={<>Empirical CDF of the ratio of changed code lines against the parent, over every parent → child step; comments and formatting are ignored, so an agent that re-emits the whole file is not counted as rewriting it.
         Left and steep: small edits; a long right tail: rewrites. ○ in the table is a step that repeats its parent.</>}
       controls={<>
         <Seg value={mode} set={setMode} options={[["agent", "per agent"], ["dataset", "per dataset"], ["run", "per run"]]} />
@@ -427,8 +436,8 @@ function ExplorePanel({ runs, color }: { runs: DashRun[]; color: (a: string | nu
   const pw = W - m.left - m.right;
   const pts = runs.map((r) => ({
     r, x: r.n,
-    y: yk === "models" ? Object.keys(usageOf(r, "model", true)).length
-      : yk === "families" ? Object.keys(usageOf(r, "family", false)).length
+    y: yk === "models" ? modelNames(usageOf(r, "model", true)).length
+      : yk === "families" ? modelNames(usageOf(r, "family", false)).length
       : Object.keys(r.libraries).length,
   }));
   const xmax = Math.max(10, ...pts.map((p) => p.x)), ymax = Math.max(4, ...pts.map((p) => p.y));
@@ -552,7 +561,7 @@ function RunTable({ runs, color }: { runs: DashRun[]; color: (a: string | null) 
       r, dataset: r.dataset_label, run: r.run, agent: agentName(r.agent), n: r.n,
       loc: median(ok.map((s) => s.loc)), first: ok[0]?.loc ?? null, last: ok.at(-1)?.loc ?? null,
       ratio: median(ratios), same: diffs.length ? diffs.filter((s) => s.same).length / diffs.length : null,
-      models: Object.keys(models).length, top: topModel, gpu: r.n_ok ? r.gpu / r.n_ok : null, pip: r.pip,
+      models: modelNames(models).length, top: topModel, gpu: r.n_ok ? r.gpu / r.n_ok : null, pip: r.pip,
       failed: r.n - r.n_ok,
     };
   });

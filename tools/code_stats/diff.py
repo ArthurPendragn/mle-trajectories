@@ -37,9 +37,14 @@ def compare(parent: dict, child: dict, parent_src: str, child_src: str,
             added += j2 - j1
     na, nb = normalized_pair or (normalized(parent_src), normalized(child_src))
 
-    # the same on code lines only (blank and comment lines dropped), as a
-    # ratio of the parent's code lines: how much of the parent was touched
-    ca, cb = _code_lines(a), _code_lines(b)
+    # the same on code lines only, as a ratio of the parent's code lines: how
+    # much of the parent was touched. Diffed on the normalized form when both
+    # parse, so an agent that rewrites the whole file (re-wrapped calls, blank
+    # lines, 40.7580 -> 40.758) is not counted as changing it
+    if na is not None and nb is not None:
+        ca, cb = na.splitlines(), nb.splitlines()
+    else:
+        ca, cb = _code_lines(a), _code_lines(b)
     code_changed = 0
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, ca, cb).get_opcodes():
         if op != "equal":

@@ -78,6 +78,12 @@ def main():
     expansions = [e for e in records(db, "expansion") if e.get("status") == "ok" and e.get("candidate_ids")]
     names = {e["id"]: f"pipeline_{i:02d}" for i, e in enumerate(expansions, 1)}
 
+    # sklearn's neg_* scorers negate an error so that higher is better; the corpus
+    # records the error itself (as the dataset's metric does) and lists best-first.
+    scoring = contract.get("scoring")
+    sign = -1 if isinstance(scoring, str) and scoring.startswith("neg_") else 1
+    metric = scoring[len("neg_"):] if sign < 0 else scoring
+
     rows = []
     for expansion in expansions:
         variants = [candidates[c] for c in expansion["candidate_ids"]
@@ -87,18 +93,19 @@ def main():
         attempt = workspace / Path(variants[0]["source_path"]).parent
         shutil.copyfile(attempt / "plan.py", pipelines / f"{names[expansion['id']]}.py")
         parent = candidates.get(expansion["parent_id"], {}).get("batch_id")
-        grid = sorted(({**v.get("configuration_description", {}), "mean_test_score": v["score"]}
-                       for v in variants), key=lambda g: g["mean_test_score"], reverse=True)
+        best = max(variants, key=lambda v: v["score"])
+        grid = [{**v.get("configuration_description", {}), "mean_test_score": sign * v["score"]}
+                for v in sorted(variants, key=lambda v: v["score"], reverse=True)]
         rows.append({"pipeline": names[expansion["id"]], "parent": names.get(parent),
                      "description": expansion["proposal"]["description"],
-                     "metric": contract.get("scoring"), "cv": spec.get("cv"),
-                     "score": max(v["score"] for v in variants),
+                     "metric": metric, "cv": spec.get("cv"),
+                     "score": sign * best["score"],
                      "duration_s": wall_time(attempt),
                      "extra": {"grid": grid} if len(grid) > 1 else {},
                      "meta_mle": {"expansion_id": expansion["id"], "parent_candidate": expansion["parent_id"],
                                   "direction": expansion.get("direction"),
-                                  "fold_scores": max(variants, key=lambda v: v["score"]).get("fold_scores")}})
-    rows.sort(key=lambda r: r["score"], reverse=True)
+                                  "fold_scores": [sign * f for f in best.get("fold_scores") or []]}})
+    rows.sort(key=lambda r: sign * r["score"], reverse=True)
     (pipelines / "results.json").write_text(json.dumps(rows, indent=1))
 
     evidence = {"evaluation_setup": [s for s in records(db, "evaluation_setup") if s.get("status") == "ok"][-1:],

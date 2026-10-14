@@ -109,6 +109,8 @@ runtime = "full"               # "full" | "sample": which kind of store to prefe
 agent = "mle-star"             # mle-star | mlevolve | mle-claude   (required)
 label = "MLE-STAR run 1"
 note = "shown on the run page"
+# variant = "greedy"                       # default: meta-mle's workspace.json policy; the dashboard
+                                           # treats "<agent> · <variant>" as its own agent
 # trajectory = "final_state.json"          # default: detected
 # originals = ["pipelines/1"]              # default: pipelines/ + sub-folders with .py
 

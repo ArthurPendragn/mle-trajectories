@@ -44,7 +44,7 @@ TRAJECTORY_FILES = ("final_state.json", "journal_slim.json")
 _DATASET_KEYS = {"label", "task", "data", "note", "metric", "defaults", "sample", "prepare"}
 _DEFAULTS_KEYS = {"source", "runtime"}
 _RUN_KEYS = {"agent", "label", "note", "trajectory", "originals", "metric", "sources",
-             "runtime"}
+             "runtime", "variant"}
 _SOURCE_KEYS = {"label", "dirs", "default", "fold_identical_code", "hidden", "note"}
 _RUNTIME_KEYS = {"label", "default", "hidden", "note"}
 _METRIC_KEYS = {"name", "lower_is_better"}
@@ -216,6 +216,7 @@ class Run:
     agent: str | None
     label: str
     note: str | None = None
+    variant: str | None = None      # e.g. meta-mle's search policy
     metric: Metric = field(default_factory=Metric)
     trajectory_file: Path | None = None
     trajectory_meta: dict = field(default_factory=dict)
@@ -388,6 +389,22 @@ def _resolve_dirs(run_path: Path, rel: list[str], where: str,
     return out
 
 
+# meta-mle search policies under the name the corpus uses for them
+_POLICY_NAMES = {"islands": "island", "draft-greedy": "greedy"}
+
+
+def _variant(path: Path, agent: str | None) -> str | None:
+    """Which configuration of the agent ran: meta-mle's search policy from its
+    workspace.json (run.toml ``variant`` overrides)."""
+    if agent != "meta-mle" or not (path / "workspace.json").is_file():
+        return None
+    try:
+        policy = json.loads((path / "workspace.json").read_text()).get("policy")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return _POLICY_NAMES.get(policy, policy) if isinstance(policy, str) else None
+
+
 def _steps_from_results(path: Path, warnings: list[str]) -> tuple[list[StepInfo], Metric]:
     try:
         rows = json.loads(path.read_text())
@@ -529,6 +546,8 @@ def load_run(dataset: Dataset, path: Path, commit: str | None = None) -> Run:
     run = Run(dataset=dataset, name=path.name, path=path, agent=agent,
               label=cfg.get("label") or path.name, note=cfg.get("note"),
               warnings=warnings)
+
+    run.variant = cfg.get("variant") or _variant(path, agent)
 
     # --- the agent's own scripts --------------------------------------------
     orig_rel = cfg.get("originals")

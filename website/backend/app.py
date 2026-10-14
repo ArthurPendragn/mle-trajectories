@@ -90,7 +90,7 @@ def _run_summary(run: Run) -> dict:
     src = run.default_source()
     return {
         "id": run.id, "dataset": run.dataset.name, "name": run.name, "label": run.label,
-        "agent": run.agent, "metric": _metric(run.metric), "lineage": run.lineage_from,
+        "agent": run.agent, "variant": run.variant, "metric": _metric(run.metric), "lineage": run.lineage_from,
         "n_steps": len(run.steps),
         "best": None if best is None else {"module": best.module, "score": best.score,
                                            "test_score": best.test_score},
