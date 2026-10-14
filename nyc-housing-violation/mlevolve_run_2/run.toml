@@ -1,0 +1,3 @@
+agent = "mlevolve"
+label = "mlevolve run 2"
+note = "gemini-3.8-flash, 100 steps / 24 h budget (config.yaml)."
