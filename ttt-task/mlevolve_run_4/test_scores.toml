@@ -1,0 +1,8 @@
+scored_at = 2026-10-15
+note = "official scorer (score.py) via the maintainer submission server, against the held-out target labels (target_with_labels.tsv), 50,000 domains"
+
+[final]                        # recomputed after the run: best-CV node re-executed on 8 cores + 1 A100
+score = 0.8689812882294968
+pipeline = "0098_0ab99cd5e906436b9fccbc6a3885acfc"
+file = "submission.tsv"
+note = "the run's original submission was lost; recomputed by re-running the best-CV step 98 unchanged (rerun CV Recall@10 0.907479 vs 0.90912 originally); scoring-server submission id 12"

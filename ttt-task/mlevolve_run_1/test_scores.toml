@@ -1,0 +1,8 @@
+scored_at = 2026-10-15
+note = "official scorer (score.py) via the maintainer submission server, against the held-out target labels (target_with_labels.tsv), 50,000 domains"
+
+[final]                        # recomputed after the run: best-CV node re-executed on 8 cores + 1 A100
+score = 0.795229343880357
+pipeline = "0013_69a9d780555049bc879461e51ce51c2e"
+file = "submission.tsv"
+note = "the run's original submission was lost; recomputed by re-running the best-CV step 13 (rerun CV Recall@10 0.84658 vs 0.84637 originally) with two environment patches for Python 3.14/pandas 3: url_df['url'].astype(str) -> .map(str) (keeps NaN as 'nan', as pandas 2 did), and multiprocessing start method set to 'fork' (the script has no __main__ guard); scoring-server submission id 13"

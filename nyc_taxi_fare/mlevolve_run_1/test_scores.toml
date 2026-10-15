@@ -1,0 +1,8 @@
+scored_at = 2026-10-15
+note = "Kaggle public leaderboard (kaggle competitions submit -c new-york-city-taxi-fare-prediction), RMSE"
+
+[final]                        # recomputed after the run: best-CV node re-executed on 8 cores + 1 A100
+score = 3.07212
+pipeline = "0028_e6481aa1e0ef4fbe8f36295cb941a811"
+file = "submission.csv"
+note = "the run's original submission was lost; recomputed by re-running the best-CV step 28 unchanged on the anonymised column names (record_id=key, cost=fare_amount, origin/dest_x/y=longitude/latitude, unit_count=passenger_count), output renamed back (rerun CV RMSE 3.9366 vs 3.9418 originally); Kaggle message rescore nyc-mlevolve1 best-CV node"

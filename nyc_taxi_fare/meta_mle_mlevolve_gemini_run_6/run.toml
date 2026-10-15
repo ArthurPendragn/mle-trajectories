@@ -1,0 +1,3 @@
+agent = "meta-mle"
+label = "meta-mle mlevolve profile (Gemini 3.8 Flash, 8h, 8 cores)"
+note = "meta-mle mlevolve search, model gemini/gemini-3.8-flash. 28 scored expansions, 0 failed. Locked neg_root_mean_squared_error on 975678 rows. 8h budget, 8 cores + 1 A100. The agent chose a 976k-row sample of train.csv.gz itself; the task description showed a full read. Plans read task sources from GCS (gs://mle-trajectories-data/nyc_taxi_fare/input)."

@@ -1,0 +1,8 @@
+scored_at = 2026-10-15
+note = "official scorer (score.py) via the maintainer submission server, against the held-out target labels (target_with_labels.tsv), 50,000 domains"
+
+[final]                        # the submission written at the end of the run
+score = 0.8658709193245299
+pipeline = "pipeline_11"
+file = "submission.tsv"
+note = "written by pipelines/final_pipeline.py (refit of pipeline_11 on all data, CV Recall@10 0.90004; best CV was pipeline_15 at 0.90019); scoring-server submission id 7"
