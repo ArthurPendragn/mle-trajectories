@@ -1,17 +1,16 @@
 """train0 for the skrubify_split source: CatBoost and the neural net are separate nodes.
 
-``CatBoostNeuralNetEnsemble`` trains both models and averages their
-probabilities inside one estimator. Stratum lowers that to a single
-pass-through predictor, so the two fits never become their own operators.
+The original fits both models on one stratified training split and early-stops
+them on the same validation rows it scores, after filling Age and Fare with
+the full-table medians. That preparation and that split stay upstream of
+``mark_as_X``. The validation rows are passed to both estimators as
+``eval_set``.
 
-This plan keeps each model as its own ``.skb.apply`` predictor. A downstream
-estimator is what makes those nodes emit ``predict()`` output on every pass
-(skrub and stratum both do this for a predictor that feeds another estimator).
-Both models are therefore asked for class probabilities — CatBoost via
-``prediction_type="Probability"``, the network via the same keyword — and
-``MeanProbabilityEnsemble`` averages those matrices and applies the original
-0.5 threshold. The heavy training stays in the two predictor nodes; the
-ensemble node only combines them.
+Each model stays its own ``.skb.apply`` predictor. A downstream estimator makes
+those nodes emit ``predict()`` output on every pass. Both are asked for class
+probabilities — CatBoost via ``prediction_type="Probability"``, the network via
+the same keyword — and ``MeanProbabilityEnsemble`` averages those matrices and
+applies the original 0.5 threshold.
 """
 
 import numpy as np
@@ -20,35 +19,14 @@ import skrub
 import torch
 import torch.nn as nn
 from catboost import CatBoostClassifier
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
-from sklearn.impute import SimpleImputer
+from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.metrics import accuracy_score
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
-
-class GetXY(TransformerMixin, BaseEstimator):
-    """Carve the models' validation set from each outer fold's training rows."""
-
-    def __init__(self, test_size=0.2, random_state=42):
-        self.test_size = test_size
-        self.random_state = random_state
-
-    def fit(self, X, y):
-        return self
-
-    def fit_transform(self, X, y):
-        parts = train_test_split(
-            X,
-            y,
-            test_size=self.test_size,
-            random_state=self.random_state,
-            stratify=y,
-        )
-        return dict(zip(("X", "X_val", "y", "y_val"), parts))
-
-    def transform(self, X):
-        return {"X": X, "X_val": None, "y": None, "y_val": None}
+CAT_COLS = ["Pclass", "Sex", "Embarked", "Title", "CabinDeck"]
+NUM_COLS = ["Age", "SibSp", "Parch", "Fare", "FamilySize"]
+FEATURE_COLS = CAT_COLS + NUM_COLS
 
 
 class TabularNeuralNet(nn.Module):
@@ -100,8 +78,8 @@ class TabularNeuralNetClassifier(ClassifierMixin, BaseEstimator):
 
     def __init__(
         self,
-        cat_cols=("Pclass", "Sex", "Embarked", "Title", "CabinDeck"),
-        num_cols=("Age", "SibSp", "Parch", "Fare", "FamilySize"),
+        cat_cols=tuple(CAT_COLS),
+        num_cols=tuple(NUM_COLS),
         random_seed=42,
         hidden_dims=(64, 32),
         dropout=0.2,
@@ -307,8 +285,44 @@ class MeanProbabilityEnsemble(ClassifierMixin, BaseEstimator):
 with skrub.config_context(eager_data_ops=False):
     train_df = skrub.as_data_op("./input/train.csv").skb.apply_func(pd.read_csv)
 
+    # Full-table medians, matching the original preparation before its split.
+    title = (
+        train_df["Name"].str.extract(r" ([A-Za-z]+)\.", expand=False).fillna("Missing")
+    )
+    cabin_deck = train_df["Cabin"].str[0].fillna("Missing")
+    prepared = train_df.assign(
+        Title=title,
+        FamilySize=train_df["SibSp"] + train_df["Parch"] + 1,
+        CabinDeck=cabin_deck,
+        Embarked=train_df["Embarked"].fillna("Missing"),
+        Age=train_df["Age"].fillna(train_df["Age"].median()),
+        Fare=train_df["Fare"].fillna(train_df["Fare"].median()),
+    )
+    model_features = prepared[FEATURE_COLS].assign(
+        Pclass=prepared["Pclass"].astype(str),
+        Sex=prepared["Sex"].astype(str),
+        Embarked=prepared["Embarked"].astype(str),
+        Title=prepared["Title"].astype(str),
+        CabinDeck=prepared["CabinDeck"].astype(str),
+    )
+
+    # The original early-stops on the same validation rows it scores. Keep that
+    # split here. mark_as_X / mark_as_y copy a node and keep its id, so the
+    # split holds model_features and its own Survived lookup, and the marks
+    # below are separate operations.
+    split_target = train_df["Survived"]
+    fixed_split = model_features.skb.apply_func(
+        train_test_split,
+        split_target,
+        test_size=0.2,
+        random_state=42,
+        stratify=split_target,
+    )
+    X_validation = fixed_split[1]
+    y_validation = fixed_split[3]
+
     y = train_df["Survived"].skb.mark_as_y()
-    X = train_df.drop(columns=["Survived"]).skb.mark_as_X(
+    X = model_features[FEATURE_COLS].skb.mark_as_X(
         cv=StratifiedShuffleSplit(
             n_splits=1,
             test_size=0.2,
@@ -317,48 +331,9 @@ with skrub.config_context(eager_data_ops=False):
         split_kwargs={},
     )
 
-    title = (
-        X["Name"].str.extract(r" ([A-Za-z]+)\.", expand=False).fillna("Missing")
-    )
-    cabin_deck = X["Cabin"].str[0].fillna("Missing")
-
-    features = X.assign(
-        Title=title,
-        FamilySize=X["SibSp"] + X["Parch"] + 1,
-        CabinDeck=cabin_deck,
-        Embarked=X["Embarked"].fillna("Missing"),
-    )
-
-    age_fare = features[["Age", "Fare"]].skb.apply(SimpleImputer(strategy="median"))
-    features = features.assign(
-        Age=age_fare["Age"],
-        Fare=age_fare["Fare"],
-    )
-
-    categorical = features[["Pclass", "Sex", "Embarked", "Title", "CabinDeck"]].assign(
-        Pclass=features["Pclass"].astype(str),
-        Sex=features["Sex"].astype(str),
-        Embarked=features["Embarked"].astype(str),
-        Title=features["Title"].astype(str),
-        CabinDeck=features["CabinDeck"].astype(str),
-    )
-    numeric = features[["Age", "SibSp", "Parch", "Fare", "FamilySize"]]
-    model_features = categorical.skb.concat([numeric], axis=1)
-
-    split_data = model_features.skb.apply(
-        GetXY(test_size=0.2, random_state=42),
-        y=y,
-        no_wrap=True,
-    )
-    X_fit = split_data["X"]
-    y_fit = split_data.get("y", y)
-    X_val = split_data["X_val"]
-    y_val = split_data["y_val"]
-
-    # Plain CatBoostClassifier. cat_features is a fit argument so it is not a
-    # constructor parameter: passing it there makes sklearn's clone fail.
-    # predict_kwargs asks the node for the probability matrix the ensemble
-    # averages.
+    # cat_features is a fit argument so it is not a constructor parameter:
+    # passing it there makes sklearn's clone fail. predict_kwargs asks the
+    # node for the probability matrix the ensemble averages.
     catboost_model = CatBoostClassifier(
         iterations=600,
         learning_rate=0.03,
@@ -367,27 +342,27 @@ with skrub.config_context(eager_data_ops=False):
         random_seed=42,
         verbose=0,
     )
-    catboost_proba = X_fit.skb.apply(
+    catboost_proba = X.skb.apply(
         catboost_model,
-        y=y_fit,
+        y=y,
         fit_kwargs={
-            "cat_features": ["Pclass", "Sex", "Embarked", "Title", "CabinDeck"],
-            "eval_set": (X_val, y_val),
+            "cat_features": CAT_COLS,
+            "eval_set": (X_validation, y_validation),
             "early_stopping_rounds": 50,
         },
         predict_kwargs={"prediction_type": "Probability"},
     )
 
-    neural_net_proba = X_fit.skb.apply(
+    neural_net_proba = X.skb.apply(
         TabularNeuralNetClassifier(),
-        y=y_fit,
-        fit_kwargs={"eval_set": (X_val, y_val)},
+        y=y,
+        fit_kwargs={"eval_set": (X_validation, y_validation)},
         predict_kwargs={"prediction_type": "Probability"},
     )
 
     # (n, 2) beside (n, 2) -> (n, 4), one probability block per model.
     stacked_proba = catboost_proba.skb.concat([neural_net_proba], axis=1)
-    pred = stacked_proba.skb.apply(MeanProbabilityEnsemble(), y=y_fit)
+    pred = stacked_proba.skb.apply(MeanProbabilityEnsemble(), y=y)
 
 
 if __name__ == "__main__":
