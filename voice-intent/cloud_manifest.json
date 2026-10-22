@@ -1,0 +1,33 @@
+{
+  "dataset": "voice-intent",
+  "data": "gs://mle-trajectories-data/voice-intent/input",
+  "verified": true,
+  "files": {
+    "train.parquet": {
+      "bytes": 76864103,
+      "crc32c": "rwz4jQ==",
+      "generation": 1792415463786488
+    },
+    "test.parquet": {
+      "bytes": 8168979,
+      "crc32c": "q6ntNA==",
+      "generation": 1792415462836947
+    },
+    "sample_submission.csv": {
+      "bytes": 1435384,
+      "crc32c": "4liPqg==",
+      "generation": 1792415462395907
+    },
+    "intents.csv": {
+      "bytes": 1068,
+      "crc32c": "QjPELw==",
+      "generation": 1792415462030748
+    },
+    "scenarios.csv": {
+      "bytes": 188,
+      "crc32c": "vSL3BQ==",
+      "generation": 1792415461926319
+    }
+  },
+  "total_bytes": 86469722
+}

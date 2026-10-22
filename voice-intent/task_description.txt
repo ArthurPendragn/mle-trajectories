@@ -1,0 +1,51 @@
+# Task
+
+Predict the intent of a short command or question a user says to a voice assistant (e.g. "wake me up at five am this week" → `alarm_set`). Utterances come from 52 locales (languages and regions). There are 60 intents.
+
+There is no predefined validation split: the training data is a single file, and you need to build your own validation split.
+
+# Metric
+
+Submissions are evaluated on accuracy: the fraction of test rows whose predicted `intent` equals the true intent. Higher is better.
+
+# Submission format
+
+A CSV with a header row and columns `row_id`, `intent`: exactly one row per test `row_id`, with `intent` an integer id from `intents.csv`, e.g.
+
+```
+row_id,intent
+0,48
+1,46
+etc.
+```
+
+# Data files
+
+The dataset is stored in Google Cloud Storage at:
+gs://mle-trajectories-data/voice-intent/input
+
+- `train.parquet` - the training set (704,444 rows), with `intent` as target
+- `test.parquet` - the test set (154,648 rows); predict `intent` for each `row_id`
+- `intents.csv` - `intent`, `name`: names of the 60 intent ids (e.g. 48 = `alarm_set`)
+- `scenarios.csv` - `scenario`, `name`: names of the 18 scenario ids
+- `sample_submission.csv` - a sample submission file in the correct format (predicts the most common intent for every row)
+
+Columns:
+- `row_id` - (test only) unique integer identifying each test row; the key of your submission
+- `locale` - language and region, e.g. `de-DE`
+- `text` - the utterance
+- `intent` - (train only) the target, an integer intent id
+- `scenario` - (train only) integer scenario id, a coarse grouping of intents
+- `annotated_text` - (train only) the utterance with slot annotations inline, e.g. `wake me up at [time : five am]`
+- `worker_id` - (train only) the annotator who wrote the utterance
+- `slot_method` - (train only) how each annotated slot was produced
+- `judgments` - (train only) quality ratings from other annotators (intent, slots, grammar, spelling, language)
+
+Read the data directly from GCS using the agent reader's Application Default Credentials (ADC), e.g.
+
+```python
+import pandas as pd
+root = "gs://mle-trajectories-data/voice-intent/input"
+train = pd.read_parquet(f"{root}/train.parquet")
+test = pd.read_parquet(f"{root}/test.parquet")
+```

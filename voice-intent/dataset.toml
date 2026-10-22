@@ -1,0 +1,8 @@
+label = "Voice assistant intent"
+task = "multiclass classification"
+data = "gs://mle-trajectories-data/voice-intent/input"
+note = "Source: AmazonScience/massive all_1.1 (train+validation as train, official test as test), anonymised by prepare.py: id/partition dropped, rows shuffled, columns renamed. Do not show this note to agents. Hidden evaluation via the scoring server (voice-intent)."
+
+[metric]
+name = "accuracy"
+lower_is_better = false
