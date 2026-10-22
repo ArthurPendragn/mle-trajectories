@@ -1,0 +1,8 @@
+! /home/estrauss-ldap/repos/mle-trajectories/nyc_taxi_fare has no input/ -- pipelines reading ./input will fail
+1 pipeline(s), 1 to measure (0 cached)
+  run-in: /home/estrauss-ldap/repos/mle-trajectories/nyc_taxi_fare
+  store:  /home/estrauss-ldap/repos/mle-trajectories/nyc_taxi_fare/meta_mle_mlevolve_gemini_run_4_upscaled_tuned/runtime_stats_pipelines_fulldata.json
+  data:   full data
+[1/1] pipeline_02 … ok · 2199.3s · 6890MB peak · full data · 21 op types · score -3.77999
+
+1 measured (0 failed) · store now holds 1/1 ok · /home/estrauss-ldap/repos/mle-trajectories/nyc_taxi_fare/meta_mle_mlevolve_gemini_run_4_upscaled_tuned/runtime_stats_pipelines_fulldata.json

@@ -1,0 +1,674 @@
+{
+ "version": 1,
+ "meta": {
+  "pipelines": [
+   "/home/estrauss-ldap/repos/mle-trajectories/nyc_taxi_fare/meta_mle_mlevolve_gemini_run_4_upscaled_tuned/pipelines"
+  ],
+  "run_in": "/home/estrauss-ldap/repos/mle-trajectories/nyc_taxi_fare",
+  "data": "full data",
+  "data_fingerprint": null,
+  "stats_enabled": true,
+  "cv_from_plan": "stratum grid_search resolves mark_as_X(cv=...)",
+  "mem_mode": "process",
+  "mem_interval_s": 0.1,
+  "mem_csv_dir": "runtime_stats_pipelines_fulldata.mem",
+  "versions": {
+   "stratum": "0.0.0.dev2",
+   "stratum_commit": "70671d10247ec251851d4c09f68589fe98b31bae",
+   "skrub": "0.11.0",
+   "sklearn": "1.8.0",
+   "python": "3.14.7"
+  },
+  "scoring": null
+ },
+ "pipelines": {
+  "pipeline_02": {
+   "status": "ok",
+   "error": null,
+   "scored_by": "runner (build())",
+   "wall_s": 2199.2563,
+   "op_time_s": 2198.3446,
+   "buffer_overhead_s": 0.0449,
+   "n_op_calls": 171,
+   "ops": [
+    {
+     "op": "PredictorOp(TorchMLPRegressor())",
+     "count": 10,
+     "time_s": 1824.489546
+    },
+    {
+     "op": "PandasDatetimeConversionOp",
+     "count": 10,
+     "time_s": 333.074838
+    },
+    {
+     "op": "PandasReadCSV(gs://mle-trajectories-data/nyc_taxi_fare/input/tr...",
+     "count": 1,
+     "time_s": 23.954049
+    },
+    {
+     "op": "PandasAssignMapOp(assign: d_lat, d_lon, distance_km, manhattan_km, ...",
+     "count": 10,
+     "time_s": 12.085077
+    },
+    {
+     "op": "Split(Train/Test) [df]",
+     "count": 10,
+     "time_s": 3.525065
+    },
+    {
+     "op": "PandasIndexSelectionOp(mask)",
+     "count": 1,
+     "time_s": 0.751526
+    },
+    {
+     "op": "MethodCallExec(abs)",
+     "count": 20,
+     "time_s": 0.245783
+    },
+    {
+     "op": "NumericOp(subtract)",
+     "count": 20,
+     "time_s": 0.168692
+    },
+    {
+     "op": "ScoreCandidates(default) [df]",
+     "count": 5,
+     "time_s": 0.03802
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols[['pickup_longitude', 'pickup_latitude', 'dro...",
+     "count": 10,
+     "time_s": 0.007801
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['dropoff_longitude'])",
+     "count": 10,
+     "time_s": 0.001129
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['pickup_datetime'])",
+     "count": 10,
+     "time_s": 0.001066
+    },
+    {
+     "op": "PandasDropOp",
+     "count": 1,
+     "time_s": 0.000825
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['dropoff_latitude'])",
+     "count": 10,
+     "time_s": 0.00042
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['pickup_longitude'])",
+     "count": 10,
+     "time_s": 0.0003
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['pickup_latitude'])",
+     "count": 10,
+     "time_s": 0.000199
+    },
+    {
+     "op": "PandasResetIndexOp(reset_index)",
+     "count": 1,
+     "time_s": 0.000168
+    },
+    {
+     "op": "PandasColumnProjectionOp(cols['fare_amount'])",
+     "count": 1,
+     "time_s": 3.9e-05
+    },
+    {
+     "op": "BuildSplitter(KFold)",
+     "count": 1,
+     "time_s": 3.3e-05
+    },
+    {
+     "op": "SplitOutput(y) [df]",
+     "count": 10,
+     "time_s": 1.6e-05
+    },
+    {
+     "op": "SplitOutput(X) [df]",
+     "count": 10,
+     "time_s": 5e-06
+    }
+   ],
+   "pool": {
+    "hits": 272,
+    "misses": 0,
+    "hit_rate": 1.0,
+    "evictions": 0,
+    "serialize_s": 0.0,
+    "deserialize_s": 0.0,
+    "bytes_spilled": 0,
+    "bytes_loaded": 0
+   },
+   "scores": [
+    -3.779991881923801
+   ],
+   "best_score": -3.779991881923801,
+   "cv": "KFold(n_splits=5, random_state=42, shuffle=True)",
+   "cv_declared_on_plan": true,
+   "scoring": "neg_root_mean_squared_error",
+   "scoring_honoured": true,
+   "total_s": 2202.1336,
+   "memory": {
+    "peak_mb": 6889.6,
+    "peak_at_s": 521.592,
+    "mean_mb": 5865.3,
+    "start_mb": 260.0,
+    "end_mb": 2311.5,
+    "n_samples": 21839,
+    "interval_s": 0.1,
+    "duration_s": 2202.135,
+    "curve": [
+     [
+      0.012,
+      260.0
+     ],
+     [
+      18.261,
+      2089.0
+     ],
+     [
+      36.516,
+      4352.1
+     ],
+     [
+      54.758,
+      4372.1
+     ],
+     [
+      73.001,
+      4394.1
+     ],
+     [
+      91.238,
+      5859.2
+     ],
+     [
+      109.491,
+      6291.1
+     ],
+     [
+      127.745,
+      6291.1
+     ],
+     [
+      145.994,
+      6291.1
+     ],
+     [
+      164.248,
+      6287.2
+     ],
+     [
+      182.482,
+      6287.1
+     ],
+     [
+      200.721,
+      6287.2
+     ],
+     [
+      218.958,
+      6291.7
+     ],
+     [
+      237.203,
+      6291.7
+     ],
+     [
+      255.585,
+      6291.7
+     ],
+     [
+      273.821,
+      6284.5
+     ],
+     [
+      292.059,
+      6288.3
+     ],
+     [
+      310.314,
+      6288.2
+     ],
+     [
+      328.56,
+      6292.7
+     ],
+     [
+      346.805,
+      6292.0
+     ],
+     [
+      365.033,
+      6292.7
+     ],
+     [
+      383.269,
+      6286.5
+     ],
+     [
+      401.523,
+      6289.3
+     ],
+     [
+      419.781,
+      6288.5
+     ],
+     [
+      438.02,
+      6029.4
+     ],
+     [
+      456.216,
+      3447.8
+     ],
+     [
+      474.447,
+      4863.5
+     ],
+     [
+      492.729,
+      4885.5
+     ],
+     [
+      510.928,
+      4905.5
+     ],
+     [
+      529.153,
+      6405.1
+     ],
+     [
+      547.407,
+      6405.0
+     ],
+     [
+      565.661,
+      6405.0
+     ],
+     [
+      583.911,
+      6407.2
+     ],
+     [
+      602.152,
+      6407.2
+     ],
+     [
+      620.359,
+      6407.2
+     ],
+     [
+      638.566,
+      6406.1
+     ],
+     [
+      656.777,
+      6406.1
+     ],
+     [
+      674.982,
+      6406.1
+     ],
+     [
+      693.222,
+      6406.1
+     ],
+     [
+      711.941,
+      6408.3
+     ],
+     [
+      730.19,
+      6408.3
+     ],
+     [
+      748.439,
+      6408.3
+     ],
+     [
+      766.618,
+      6405.1
+     ],
+     [
+      784.852,
+      6405.1
+     ],
+     [
+      803.103,
+      6405.1
+     ],
+     [
+      821.33,
+      6409.4
+     ],
+     [
+      839.56,
+      6409.4
+     ],
+     [
+      857.818,
+      6409.4
+     ],
+     [
+      876.041,
+      6167.4
+     ],
+     [
+      894.261,
+      3709.6
+     ],
+     [
+      912.493,
+      4605.8
+     ],
+     [
+      930.733,
+      4627.8
+     ],
+     [
+      948.973,
+      4647.8
+     ],
+     [
+      967.206,
+      6136.6
+     ],
+     [
+      985.458,
+      6138.6
+     ],
+     [
+      1003.701,
+      6138.6
+     ],
+     [
+      1021.953,
+      6137.4
+     ],
+     [
+      1040.205,
+      6137.4
+     ],
+     [
+      1058.455,
+      6137.4
+     ],
+     [
+      1076.709,
+      6139.7
+     ],
+     [
+      1094.965,
+      6139.7
+     ],
+     [
+      1113.218,
+      6139.7
+     ],
+     [
+      1131.474,
+      6138.5
+     ],
+     [
+      1149.727,
+      6137.7
+     ],
+     [
+      1167.934,
+      6138.3
+     ],
+     [
+      1186.158,
+      5970.8
+     ],
+     [
+      1204.41,
+      6140.5
+     ],
+     [
+      1222.664,
+      6140.7
+     ],
+     [
+      1240.917,
+      6140.5
+     ],
+     [
+      1259.166,
+      6139.6
+     ],
+     [
+      1277.42,
+      6139.6
+     ],
+     [
+      1295.675,
+      6139.6
+     ],
+     [
+      1313.859,
+      3310.3
+     ],
+     [
+      1332.1,
+      4737.0
+     ],
+     [
+      1350.524,
+      4759.3
+     ],
+     [
+      1368.77,
+      4779.3
+     ],
+     [
+      1387.015,
+      6611.1
+     ],
+     [
+      1405.268,
+      6346.5
+     ],
+     [
+      1423.525,
+      6347.3
+     ],
+     [
+      1441.752,
+      6347.3
+     ],
+     [
+      1460.008,
+      6348.7
+     ],
+     [
+      1478.245,
+      6347.9
+     ],
+     [
+      1496.496,
+      6348.5
+     ],
+     [
+      1514.753,
+      6344.0
+     ],
+     [
+      1533.012,
+      6345.3
+     ],
+     [
+      1551.238,
+      6345.3
+     ],
+     [
+      1569.469,
+      6347.0
+     ],
+     [
+      1588.241,
+      6347.0
+     ],
+     [
+      1606.498,
+      6347.7
+     ],
+     [
+      1624.722,
+      6346.3
+     ],
+     [
+      1642.936,
+      6346.3
+     ],
+     [
+      1661.17,
+      6345.6
+     ],
+     [
+      1679.428,
+      6346.5
+     ],
+     [
+      1697.683,
+      6348.6
+     ],
+     [
+      1715.941,
+      6348.6
+     ],
+     [
+      1734.183,
+      6348.3
+     ],
+     [
+      1752.347,
+      3158.2
+     ],
+     [
+      1770.582,
+      4473.0
+     ],
+     [
+      1788.821,
+      4495.3
+     ],
+     [
+      1807.066,
+      4515.3
+     ],
+     [
+      1825.307,
+      5372.4
+     ],
+     [
+      1843.555,
+      6079.9
+     ],
+     [
+      1861.79,
+      6079.9
+     ],
+     [
+      1880.017,
+      6079.9
+     ],
+     [
+      1898.269,
+      6077.3
+     ],
+     [
+      1916.521,
+      6076.4
+     ],
+     [
+      1934.745,
+      6077.2
+     ],
+     [
+      1952.995,
+      6078.9
+     ],
+     [
+      1971.248,
+      6079.9
+     ],
+     [
+      1989.503,
+      6080.9
+     ],
+     [
+      2007.76,
+      6077.2
+     ],
+     [
+      2026.013,
+      6077.5
+     ],
+     [
+      2044.27,
+      6077.5
+     ],
+     [
+      2062.527,
+      6081.0
+     ],
+     [
+      2080.781,
+      6080.0
+     ],
+     [
+      2099.038,
+      6081.0
+     ],
+     [
+      2117.292,
+      5978.5
+     ],
+     [
+      2135.552,
+      6075.5
+     ],
+     [
+      2153.811,
+      6077.5
+     ],
+     [
+      2172.062,
+      6077.5
+     ],
+     [
+      2190.26,
+      3189.7
+     ],
+     [
+      2202.135,
+      2311.5
+     ]
+    ],
+    "scored_from_s": 2.88,
+    "scored_to_s": 2202.137
+   },
+   "mem_mode": "process",
+   "max_rss_mb": 6911.5,
+   "stats_enabled": true,
+   "eager_previews": false,
+   "elapsed_s": 2206.858,
+   "code_sha1": "041b2784ec49d132",
+   "measured_at": "2026-10-18T10:46:00+00:00",
+   "path": "pipelines/pipeline_02.py",
+   "stratum_commit": "70671d10247ec251851d4c09f68589fe98b31bae",
+   "data": "full data",
+   "data_fingerprint": null
+  }
+ }
+}

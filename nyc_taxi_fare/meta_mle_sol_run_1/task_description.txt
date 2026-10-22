@@ -1,0 +1,44 @@
+# Task
+
+Predict the fare amount (`fare_amount`, in USD, inclusive of tolls) for a taxi ride in New York City given the pickup and dropoff locations, the pickup timestamp and the passenger count.
+
+# Metric
+
+Submissions are evaluated on the root mean squared error (RMSE) between the predicted and the observed fare amounts. Lower is better.
+
+# Submission format
+
+A CSV with a header row and columns `key`, `fare_amount`: one row per test `key` with the predicted fare, e.g.
+
+```
+key,fare_amount
+2015-01-27 13:08:24.0000002,11.00
+2015-02-27 13:08:24.0000003,12.05
+etc.
+```
+
+# Data files
+
+The dataset is stored in Google Cloud Storage at:
+gs://mle-trajectories-data/nyc_taxi_fare/input
+
+- `train.csv.gz` - the training set (55,423,856 rows, gzip-compressed CSV), with `fare_amount` as target and `key` as identifier
+- `test.csv` - the test set (9,914 rows); predict `fare_amount` for each `key`
+- `sample_submission.csv` - a sample submission file in the correct format
+
+Columns:
+- `key` - unique string identifying each row (the pickup datetime plus a unique integer)
+- `pickup_datetime` - timestamp of the start of the ride
+- `pickup_longitude`, `pickup_latitude` - pickup coordinates
+- `dropoff_longitude`, `dropoff_latitude` - dropoff coordinates
+- `passenger_count` - number of passengers in the taxi
+- `fare_amount` - (train only) the target, the fare in USD
+
+Read the data directly from GCS using the agent reader's Application Default Credentials (ADC), e.g.
+
+```python
+import pandas as pd
+root = "gs://mle-trajectories-data/nyc_taxi_fare/input"
+train = pd.read_csv(f"{root}/train.csv.gz")
+test = pd.read_csv(f"{root}/test.csv")
+```

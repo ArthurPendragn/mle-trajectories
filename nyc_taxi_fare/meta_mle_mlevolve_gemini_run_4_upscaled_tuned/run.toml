@@ -1,0 +1,3 @@
+agent = "meta-mle"
+label = "meta-mle mlevolve profile (Gemini 3.8 Flash, 8h, 8 cores), upscaled, pipeline_02 hand-tuned"
+note = "Derived from meta_mle_mlevolve_gemini_run_4_upscaled (10M rows, n_jobs 16). Only pipeline_02 changed: torch MLP batch_size 2048 -> 16384, AdamW lr 3e-3 -> 8.5e-3 (sqrt scaling for 8x batch), epochs 15 -> 6, hand-set for 10M rows to compare runtime against the upscaled copy. Not an agent run."
