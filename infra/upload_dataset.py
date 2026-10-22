@@ -20,6 +20,9 @@ FILES = {
         "domains.parquet", "link-graph.parquet", "url-classification.csv",
         "freedom-of-the-press.csv",
     ),
+    "voice-intent": (
+        "train.parquet", "test.parquet", "sample_submission.csv", "intents.csv", "scenarios.csv",
+    ),
 }
 REPO = Path(__file__).resolve().parents[1]
 

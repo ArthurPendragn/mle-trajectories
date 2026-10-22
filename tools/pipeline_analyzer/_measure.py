@@ -23,6 +23,8 @@ a smaller sweep runs on a sample folder (``tools/dataset_sample``) instead:
    convention: its harness did the scoring) is scored after it ran, the way that
    harness did -- ``pred.skb.make_grid_search(fitted=True, refit=False)`` with no
    ``cv=`` and ``--scoring`` -- through the same replaced ``make_grid_search``.
+   A meta-mle file (``build() -> {"pred", "scoring", ...}``) runs in the namespace
+   of its ``evaluation_setup.py`` and is scored with the ``scoring`` it returns.
 3. The file runs under ``skrub.config_context(eager_data_ops=False)``, so
    building the plan computes no previews: without it every recorded op is
    evaluated once at build time, which on a data-lake plan re-reads every table
@@ -169,6 +171,8 @@ def measure(path: Path, *, stats: bool,
     from skrub._data_ops._skrub_namespace import SkrubNamespace
     from stratum._api import grid_search as stratum_grid_search
 
+    from .loader import meta_mle_namespace
+
     tracker = None
     if mem_mode != "off":
         from .memory_tracker import MemoryTracker
@@ -239,13 +243,25 @@ def measure(path: Path, *, stats: bool,
     t0 = time.perf_counter()
     try:
         with skrub.config_context(eager_data_ops=False):
-            module = runpy.run_path(str(path), run_name="__main__")
+            module = runpy.run_path(str(path), run_name="__main__",
+                                    init_globals=meta_mle_namespace(path))
             pred = module.get("pred")
             if out["status"] != "ok" and hasattr(pred, "skb"):
                 # A plan-only file: score it as its harness did.
                 out["scored_by"] = "runner (module-level pred)"
                 pred.skb.make_grid_search(n_jobs=1, fitted=True, refit=False,
                                           scoring=scoring)
+            elif out["status"] != "ok" and callable(module.get("build")):
+                # meta-mle: build() -> {"pred", "scoring", ...}; its runner scores
+                # pred with the scoring the locked evaluation setup returned.
+                built = module["build"]()
+                pred = built.get("pred") if isinstance(built, dict) else built
+                if hasattr(pred, "skb"):
+                    out["scored_by"] = "runner (build())"
+                    pred.skb.make_grid_search(
+                        n_jobs=1, fitted=True, refit=False,
+                        scoring=(built.get("scoring") if isinstance(built, dict)
+                                 else None) or scoring)
     except Exception as exc:  # noqa: BLE001 - reported, not raised
         detail = f"{type(exc).__name__}: {exc}"
         if out["status"] == "ok":

@@ -78,21 +78,25 @@ def _fresh_import(module_name: str, path: Path):
 
 
 def _inject_meta_mle_evaluation(mod, path: Path) -> None:
+    for k, v in meta_mle_namespace(path).items():
+        setattr(mod, k, v)
+
+
+def meta_mle_namespace(path: Path) -> dict:
     """meta-mle plans call ``build_evaluation()`` without importing it: its runner
     runs a plan in the namespace of the locked ``evaluation_setup.py``, with that
     file's ``build`` as ``build_evaluation``. Plans rely on the rest of it too
-    (``skrub``, ``TRAIN_PATH`` used unimported). Do the same when that file sits
-    beside the plan; the plan's own definitions override."""
+    (``skrub``, ``TRAIN_PATH`` used unimported). Returns that namespace when the
+    file sits beside the plan (else ``{}``); the plan's own definitions override."""
     setup = path.parent / "evaluation_setup.py"
     if path.stem == "evaluation_setup" or not setup.exists():
-        return
+        return {}
     spec = importlib.util.spec_from_file_location("evaluation_setup", setup)
     setup_mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(setup_mod)
-    for k, v in vars(setup_mod).items():
-        if not k.startswith("__"):
-            setattr(mod, k, v)
-    mod.build_evaluation = setup_mod.build
+    ns = {k: v for k, v in vars(setup_mod).items() if not k.startswith("__")}
+    ns["build_evaluation"] = setup_mod.build
+    return ns
 
 
 def load_pipeline(module_name: str, pipe_dir: Path, *, unroll_choices: bool = False) -> Pipeline:

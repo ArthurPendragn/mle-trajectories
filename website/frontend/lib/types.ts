@@ -119,6 +119,7 @@ export type TreeData = {
   phase_colors: Record<string, string>;
   svg: { delta?: string; phase?: string };
   lower_is_better?: boolean;
+  has_refs?: boolean;          // steps that drew on other steps besides their parent
 };
 
 export type RuntimeProfile = {

@@ -116,6 +116,7 @@ class StepInfo:
     score: float | None
     desc: str | None = None
     test_score: float | None = None    # from test_scores.toml, filled in by load_run
+    refs: tuple[str, ...] = ()         # other steps it drew on besides its parent
 
 
 @dataclass
@@ -405,6 +406,38 @@ def _variant(path: Path, agent: str | None) -> str | None:
     return _POLICY_NAMES.get(policy, policy) if isinstance(policy, str) else None
 
 
+def _add_graph_refs(run: Run, warnings: list[str]) -> None:
+    """meta-mle's graph.json: the candidates a step referenced besides its parent
+    (mlevolve-style evolve/fusion steps read other branches). Candidates map to
+    the exported pipelines by source hash."""
+    path = run.path / "graph.json"
+    if not path.is_file() or not run.steps or run.originals is None:
+        return
+    try:
+        cands = json.loads(path.read_text()).get("candidates") or []
+    except (OSError, json.JSONDecodeError) as exc:
+        warnings.append(f"graph.json: unreadable ({exc})")
+        return
+    by_hash = {}
+    for module, f in run.originals.files.items():
+        try:
+            by_hash[hashlib.sha256(f.read_bytes()).hexdigest()] = module
+        except OSError:
+            pass
+    module_of = {c["id"]: by_hash.get(c.get("source_sha256")) for c in cands if isinstance(c, dict) and "id" in c}
+    refs: dict[str, list[str]] = {}
+    for c in cands:
+        m = module_of.get(c.get("id")) if isinstance(c, dict) else None
+        if m is None:
+            continue
+        for rid in c.get("reference_ids") or []:
+            r = module_of.get(rid)
+            if r and r != m and r not in refs.setdefault(m, []):
+                refs[m].append(r)
+    for s in run.steps:
+        s.refs = tuple(r for r in refs.get(s.module, ()) if r != s.parent)
+
+
 def _steps_from_results(path: Path, warnings: list[str]) -> tuple[list[StepInfo], Metric]:
     try:
         rows = json.loads(path.read_text())
@@ -583,6 +616,7 @@ def load_run(dataset: Dataset, path: Path, commit: str | None = None) -> Run:
             run.steps, derived_metric = _steps_from_results(results, warnings)
         else:
             warnings.append(f"{agent} run without pipelines/results.json: no lineage")
+        _add_graph_refs(run, warnings)
     run.metric = _merge_metric(_metric(cfg.get("metric"), "run.toml", warnings),
                                derived_metric, dataset.metric)
 

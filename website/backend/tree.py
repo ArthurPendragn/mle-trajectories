@@ -2,7 +2,8 @@
 
 Needs no pipeline loading -- only the steps and their parents -- so it is drawn
 for every run that has a lineage, whether or not it was ever skrubified. Nodes
-whose pipeline has no plan in the selected source are drawn dashed.
+whose pipeline has no plan in the selected source are drawn dashed; steps an
+agent drew on besides the parent are linked by dashed violet edges.
 
 Each node group carries ``data-module="<pipeline>"`` so the frontend can make it
 clickable (ticking that pipeline in the operator explorer).
@@ -96,6 +97,13 @@ def build_tree(run: Run, source: Source | None) -> dict:
         for s in steps:
             if s.parent in index:
                 g.edge(s.parent, s.module)
+        # other steps a step drew on (meta-mle's evolve / fusion): dashed, and
+        # left out of the layout so the tree keeps the shape of its parents
+        for s in steps:
+            for r in s.refs:
+                if r in index:
+                    g.edge(r, s.module, style="dashed", color="#8b5cf6", penwidth="1.2",
+                           constraint="false", **{"class": "ref"})
         return g.source
 
     def annotate(svg: str) -> str:
@@ -112,4 +120,4 @@ def build_tree(run: Run, source: Source | None) -> dict:
     if phase_colors:
         svgs["phase"] = annotate(_render(dot("phase")))
     return {"modules": modules, "phase_colors": phase_colors, "svg": svgs,
-            "lower_is_better": lower}
+            "lower_is_better": lower, "has_refs": any(s.refs for s in steps)}

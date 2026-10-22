@@ -17,6 +17,7 @@ use the existing reader profile on the agent machine.
 | tab_playground_dec_21 | `gs://mle-trajectories-data/tab_playground_dec_21/input` | Original Kaggle test | Verified |
 | aptos2019-blindness-detection | `gs://mle-trajectories-data/aptos2019-blindness-detection/input` | Original Kaggle test | Verified |
 | ttt-task | `gs://mle-trajectories-data/ttt-task/input` | Original held-out targets; private scorer and labels | Verified |
+| voice-intent | `gs://mle-trajectories-data/voice-intent/input` | Anonymised official test split; private labels, scoring server | Verified |
 
 Publication is complete only when the dataset has `cloud_manifest.json` with
 `verified: true`; the website's `dataset.toml` data URI is updated after that

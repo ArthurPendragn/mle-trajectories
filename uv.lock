@@ -1529,7 +1529,7 @@ requires-dist = [
     { name = "litellm", specifier = ">=1.97.0" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "skorch", specifier = ">=1.4.0" },
-    { name = "stratum-ai", git = "https://github.com/deem-data/stratum.git?rev=1ad2186dca2d0a94699e394423f43fe87937cc10" },
+    { name = "stratum-ai", git = "https://github.com/deem-data/stratum.git?rev=70671d10247ec251851d4c09f68589fe98b31bae" },
     { name = "tenacity", specifier = ">=8.0" },
     { name = "torch", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=2.13.0" },
     { name = "torch", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=2.13.0", index = "https://download.pytorch.org/whl/cu126" },
@@ -2856,7 +2856,7 @@ wheels = [
 [[package]]
 name = "stratum-ai"
 version = "0.0.0.dev2"
-source = { git = "https://github.com/deem-data/stratum.git?rev=1ad2186dca2d0a94699e394423f43fe87937cc10#1ad2186dca2d0a94699e394423f43fe87937cc10" }
+source = { git = "https://github.com/deem-data/stratum.git?rev=70671d10247ec251851d4c09f68589fe98b31bae#70671d10247ec251851d4c09f68589fe98b31bae" }
 dependencies = [
     { name = "duckdb" },
     { name = "graphviz" },

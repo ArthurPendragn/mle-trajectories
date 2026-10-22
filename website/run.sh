@@ -19,7 +19,11 @@ fi
 
 api_args=()
 [[ $mode == dev ]] && api_args+=(--reload)
-uv run --group website python -m website.backend "${api_args[@]}" &
+# .env (gitignored) carries API keys and GOOGLE_APPLICATION_CREDENTIALS for
+# gs:// datasets; sweeps inherit the backend's environment.
+env_args=()
+[[ -f .env ]] && env_args+=(--env-file .env)
+uv run "${env_args[@]}" --group website python -m website.backend "${api_args[@]}" &
 api=$!
 trap 'kill "$api" 2>/dev/null || true' EXIT INT TERM
 

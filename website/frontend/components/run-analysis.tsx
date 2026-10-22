@@ -52,6 +52,7 @@ function SearchTree({ tree, selected, onNode }: {
   const modes = (["delta", "phase"] as const).filter((m) => tree.svg[m]);
   const [mode, setMode] = useState<"delta" | "phase">("delta");
   const [fit, setFit] = useState(true);   // scale to the box width, or graphviz's own size
+  const [refs, setRefs] = useState(true); // dashed edges to the other steps a step drew on
   const box = useRef<HTMLDivElement>(null);
 
   // selection outline, driven by the explorer's ticked pipelines
@@ -72,13 +73,21 @@ function SearchTree({ tree, selected, onNode }: {
       <p className="muted small">
         Every step the agent ran, linked to the step it was derived from. Fill: green improved on
         the parent · amber flat · red regressed{tree.lower_is_better ? " (lower is better)" : ""}.
-        Dashed: no plan in the selected source. Click a node to tick it in the explorer;
+        Dashed: no plan in the selected source.
+        {tree.has_refs && " Dashed violet edges: other steps a step drew on besides its parent (evolve / fusion references)."}
+        {" "}Click a node to tick it in the explorer;
         shift-click takes its whole subtree.
       </p>
       <div className="tree-modes">
         <button className="link-button" onClick={() => setFit(!fit)}>
           {fit ? "actual size" : "fit width"}
         </button>
+        {tree.has_refs && (
+          <label>
+            <input type="checkbox" checked={refs} onChange={(e) => setRefs(e.target.checked)} />
+            <span className="ref-key" /> references
+          </label>
+        )}
         {modes.length > 1 && <>
           colour by:
           {modes.map((m) => (
@@ -96,7 +105,7 @@ function SearchTree({ tree, selected, onNode }: {
           )}
         </>}
       </div>
-      <div className={`tree-canvas${fit ? " fit" : ""}`} ref={box} onClick={click}
+      <div className={`tree-wrap${fit ? " fit" : ""}${refs ? "" : " no-refs"}`} ref={box} onClick={click}
            dangerouslySetInnerHTML={{ __html: tree.svg[mode] ?? "" }} />
     </>
   );
