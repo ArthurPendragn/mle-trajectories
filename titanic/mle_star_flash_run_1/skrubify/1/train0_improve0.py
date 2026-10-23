@@ -240,14 +240,30 @@ def _positive_class_probability(values):
     return array.reshape(-1)
 
 
-def ensemble_predictions(cb_probability, nn_probability, mode):
-    if mode == "fit":
-        return None
-    probability = (
-        0.5 * _positive_class_probability(cb_probability)
-        + 0.5 * _positive_class_probability(nn_probability)
-    )
-    return (probability >= 0.5).astype(int)
+class MeanProbabilityEnsemble(ClassifierMixin, BaseEstimator):
+    """Threshold the equal-weight average of two positive-class probabilities.
+
+    The members are the upstream classifier nodes. This estimator does not fit
+    them: ``X`` is the CatBoost probability and ``nn_probability`` is the
+    neural net's. Averaging those two vectors is the whole ``predict``.
+    """
+
+    def fit(self, X, y, nn_probability=None):
+        cb_probability = _positive_class_probability(X)
+        nn_probability = _positive_class_probability(nn_probability)
+        if cb_probability.shape != nn_probability.shape:
+            raise ValueError(
+                "CatBoost and neural-net probabilities have different lengths: "
+                f"{cb_probability.shape[0]} and {nn_probability.shape[0]}."
+            )
+        self.classes_ = np.unique(np.asarray(y))
+        return self
+
+    def predict(self, X, nn_probability=None):
+        cb_probability = _positive_class_probability(X)
+        nn_probability = _positive_class_probability(nn_probability)
+        averaged = 0.5 * cb_probability + 0.5 * nn_probability
+        return (averaged >= 0.5).astype(int)
 
 
 with skrub.config_context(eager_data_ops=False):
@@ -312,7 +328,7 @@ with skrub.config_context(eager_data_ops=False):
     # 4. CatBoost early-stops on the scored hold-out, as the original does.
     # cat_features is a fit argument: the constructor form fails clone.
     # prediction_type asks for the probability matrix; column 1 is taken in
-    # ensemble_predictions, which does not run during fit.
+    # MeanProbabilityEnsemble.
     cb_probability = X_model.skb.apply(
         CatBoostClassifier(
             iterations=600,
@@ -341,8 +357,13 @@ with skrub.config_context(eager_data_ops=False):
 
     # 6. Preserve the equal-weight probability average and inclusive threshold.
     # The original scores only this ensemble, not its components separately.
-    pred = cb_probability.skb.apply_func(
-        ensemble_predictions, nn_probability, skrub.eval_mode()
+    # VotingClassifier would drop cat_features, eval_set, and the net's
+    # validation frame, so the average stays in this estimator.
+    pred = cb_probability.skb.apply(
+        MeanProbabilityEnsemble(),
+        y=y,
+        fit_kwargs={"nn_probability": nn_probability},
+        predict_kwargs={"nn_probability": nn_probability},
     )
 
     # 7. Score the original outer hold-out, with no CV override.
