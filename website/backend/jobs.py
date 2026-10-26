@@ -53,11 +53,36 @@ def _paths(run: Run, source: Source) -> dict[str, Path]:
     return {k: base.with_suffix(f".{k}") for k in ("json", "pid", "log")}
 
 
+def _zombie(pid: int) -> bool:
+    """A finished child whose parent has not waited on it.
+
+    ``os.kill(pid, 0)`` still succeeds for a zombie, so a completed worker would
+    otherwise occupy a build slot until the API process itself exits.
+    """
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    # comm is wrapped in parentheses and may contain spaces; the state is the
+    # first field after the closing one.
+    return stat[stat.rfind(")") + 2:].split(maxsplit=1)[0] == "Z"
+
+
 def _alive(pid_file: Path) -> bool:
     try:
-        os.kill(int(pid_file.read_text()), 0)
-        return True
+        pid = int(pid_file.read_text())
     except (OSError, ValueError):
+        return False
+    if _zombie(pid):
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
         return False
 
 
