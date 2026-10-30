@@ -44,7 +44,7 @@ explicit = true
 
 [tool.uv.sources]
 # stratum from the main branch; pinned by commit (uv fetches the rev from any branch)
-stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "075bb1b2d230c95e73c613aef320d88bcfc6dcc3" }
+stratum-ai = { git = "https://github.com/deem-data/stratum.git", rev = "926536feb147d50ee67c56f42452707818a3290e" }
 torch = { index = "pytorch-cu126", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 # The gcsfs 2026.8.1 release can deadlock closing a file (prefetcher close ->
 # "Calling sync() from within a running loop"); a data-lake pipeline then hangs
