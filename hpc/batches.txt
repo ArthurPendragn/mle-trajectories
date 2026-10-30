@@ -1,0 +1,9 @@
+# One line = one SLURM task. The first field is the batch name. The rest are
+# scripts under PIPELINE_DIR (see hpc/env.sh), converted together.
+# init_code_1..4 are not listed: those rewrites already follow the contract.
+train0 train0.py train0_0.py train0_improve0.py train0_improve1.py train0_improve2.py train0_improve3.py train0_improve4.py
+train1 train1.py train1_improve0.py train1_improve1.py train1_improve2.py train1_improve3.py train1_improve4.py
+train2 train2.py train2_improve0.py train2_improve1.py train2_improve2.py train2_improve3.py train2_improve4.py
+train3 train3.py train3_improve0.py train3_improve1.py train3_improve2.py train3_improve3.py train3_improve4.py
+train4 train4.py
+ablation_0 ablation_0.py

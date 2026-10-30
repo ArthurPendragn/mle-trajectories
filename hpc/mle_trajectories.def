@@ -1,0 +1,40 @@
+Bootstrap: docker
+From: python:3.14-slim
+
+# Singularity image for skrubify jobs. The repo is bind-mounted at run time;
+# this image only holds the locked dependencies.
+#
+# Build from the repo root, on x86-64 (the lock pulls the CUDA torch wheel
+# on linux/x86_64):
+#   singularity build --fakeroot hpc/mle_trajectories.sif hpc/mle_trajectories.def
+
+%files
+    pyproject.toml /opt/mle-trajectories/pyproject.toml
+    uv.lock        /opt/mle-trajectories/uv.lock
+    README.md      /opt/mle-trajectories/README.md
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates git build-essential pkg-config
+    rm -rf /var/lib/apt/lists/*
+
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal
+    . "$HOME/.cargo/env"
+
+    export UV_INSTALL_DIR=/usr/local/bin
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+
+    cd /opt/mle-trajectories
+    UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --no-dev --frozen --no-install-project
+
+%environment
+    export VIRTUAL_ENV=/opt/venv
+    export PATH=/opt/venv/bin:/root/.cargo/bin:$PATH
+    export PYTHONUNBUFFERED=1
+
+%runscript
+    exec "$@"

@@ -789,7 +789,8 @@ export function createExplorer(root, D, hooks) {
       '<input type="checkbox" data-pipe="' + pi + '"' + (sel.has(pi) ? " checked" : "") +
       (p.ok ? "" : " disabled") + ">" +
       '<span class="dot" style="background:' + p.c + '"></span>' +
-      '<span class="nm">' + esc(p.n) + (p.ok ? "" : ' <span class="err">✗</span>') +
+      '<span class="nm" title="' + esc(p.n) + '">' + esc(p.n) +
+      (p.ok ? "" : ' <span class="err">✗</span>') +
       "</span>" +
       '<span class="sc">' + score + "</span>" +
       '<span class="dl ' + cls + '">' + d + "</span>" +

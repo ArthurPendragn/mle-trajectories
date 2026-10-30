@@ -38,3 +38,9 @@ __pycache__/
 # download caches next to a dataset: the BEAVER dump, and Kaggle competition
 # files that get_data.sh splits into input/
 */raw/
+
+# HPC: per-user paths and keys, the image, and SLURM logs
+hpc/config.env
+hpc/secrets.env
+hpc/_run/
+hpc/*.sif
