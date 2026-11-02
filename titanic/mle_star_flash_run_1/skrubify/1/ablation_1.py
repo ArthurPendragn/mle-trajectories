@@ -81,16 +81,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostPositiveProbability(CatBoostClassifier):
-    """Expose the original positive-class probability to the blend node."""
-
-    def __sklearn_clone__(self):
-        return type(self)(**self.get_params(deep=False))
-
-    def predict(self, X, **kwargs):
-        return super().predict_proba(X, **kwargs)[:, 1]
-
-
 class TabularNeuralNet(nn.Module):
     def __init__(self, cat_dims, emb_dims, num_features, hidden_dims=(64, 32)):
         super().__init__()
@@ -231,8 +221,10 @@ class NeuralPositiveProbability(ClassifierMixin, BaseEstimator):
 
 
 def blend_predictions(cb_probability, nn_probability, weight, mode):
+    # prediction_type="Probability" is (n_samples, n_classes); column 1 is P(1).
     if mode == "fit":
         return None
+    cb_probability = np.asarray(cb_probability, dtype=float)[:, 1]
     return (
         weight * cb_probability + (1.0 - weight) * nn_probability >= 0.5
     ).astype(int)
@@ -274,20 +266,21 @@ def make_probabilities(features, cat_cols, num_cols, y):
     # for both mechanisms. The outer scored rows are never used for training.
     cb_split = cb_features.skb.apply(GetXY(), y=y, no_wrap=True)
     cb_probability = cb_split["X"].skb.apply(
-        CatBoostPositiveProbability(
+        CatBoostClassifier(
             iterations=600,
             learning_rate=0.03,
             depth=5,
-            cat_features=cat_cols,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_split.get("y", y),
         fit_kwargs={
+            "cat_features": cat_cols,
             "eval_set": (cb_split["X_val"], cb_split["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
 
     # Keep LabelEncoder's sorted classes and unknown-category fallback, and

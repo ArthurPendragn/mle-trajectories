@@ -75,16 +75,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostPositiveProbability(CatBoostClassifier):
-    """Expose positive-class probability as this graph's prediction."""
-
-    def __sklearn_clone__(self):
-        return type(self)(**self.get_params(deep=False))
-
-    def predict(self, X, **kwargs):
-        return super().predict_proba(X, **kwargs)[:, 1]
-
-
 class TabularNeuralNet(nn.Module):
     def __init__(self, cat_dims, emb_dims, num_features, hidden_dims=(64, 32)):
         super().__init__()
@@ -280,8 +270,10 @@ class NeuralProbabilityClassifier(ClassifierMixin, BaseEstimator):
 
 
 def ensemble_predictions(cb_probability, nn_probability, mode):
+    # prediction_type="Probability" is (n_samples, n_classes); column 1 is P(1).
     if mode == "fit":
         return None
+    cb_probability = np.asarray(cb_probability, dtype=float)[:, 1]
     return (
         0.5 * cb_probability + 0.5 * nn_probability >= 0.5
     ).astype(int)
@@ -354,20 +346,21 @@ with skrub.config_context(eager_data_ops=False):
     #    using an explicit inner 20% stratified hold-out from training rows.
     cb_parts = cb_features.skb.apply(GetXY(), y=y, no_wrap=True)
     cb_probability = cb_parts["X"].skb.apply(
-        CatBoostPositiveProbability(
+        CatBoostClassifier(
             iterations=600,
             learning_rate=0.03,
             depth=5,
-            cat_features=CAT_COLS,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_parts.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_COLS,
             "eval_set": (cb_parts["X_val"], cb_parts["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
 
     # 5. Neural preprocessing is represented by separate estimator nodes.
