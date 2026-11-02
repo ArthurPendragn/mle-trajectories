@@ -72,17 +72,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostProbabilityClassifier(CatBoostClassifier):
-    """Expose probabilities to the recorded ensemble arithmetic."""
-
-    def __sklearn_clone__(self):
-        # Avoid CatBoost's cloning issue with cat_features/learning_rate.
-        return type(self)(**self.get_params(deep=False))
-
-    def predict(self, X, **kwargs):
-        return super().predict_proba(X, **kwargs)
-
-
 class CrossLayer(nn.Module):
     def __init__(self, in_dim):
         super().__init__()
@@ -178,7 +167,6 @@ class TorchProbabilityClassifier(ClassifierMixin, BaseEstimator):
         weight_decay=1e-4,
         scheduler_factor=0.5,
         scheduler_patience=10,
-        validation_fraction=0.2,
         random_state=42,
     ):
         self.batch_size = batch_size
@@ -187,32 +175,33 @@ class TorchProbabilityClassifier(ClassifierMixin, BaseEstimator):
         self.weight_decay = weight_decay
         self.scheduler_factor = scheduler_factor
         self.scheduler_patience = scheduler_patience
-        self.validation_fraction = validation_fraction
         self.random_state = random_state
 
-    def fit(self, X, y):
+    def _tensors(self, X):
+        return (
+            torch.tensor(
+                X[CAT_COLS].to_numpy(dtype=np.int64),
+                dtype=torch.long,
+                device=self.device_,
+            ),
+            torch.tensor(
+                X[NUM_COLS].to_numpy(dtype=np.float32),
+                dtype=torch.float32,
+                device=self.device_,
+            ),
+        )
+
+    def fit(self, X, y, eval_set=None, cat_dims=None):
         np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
         self.classes_ = np.unique(y)
         self.device_ = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        x_cat = X[CAT_COLS].to_numpy(dtype=np.int64)
-        x_num = X[NUM_COLS].to_numpy(dtype=np.float32)
-        cat_dims = (x_cat.max(axis=0) + 1).tolist()
+        # Vocabulary sizes are computed on the whole outer-training fold, which
+        # includes the scheduler holdout. Recomputing them here would see only
+        # the rows this fit call trains on.
+        cat_dims = np.asarray(cat_dims, dtype=int).ravel().tolist()
         emb_dims = [max(2, int(round(dim**0.5 * 2))) for dim in cat_dims]
-
-        # This is an INNER split for the torch training loop's scheduler, not
-        # the outer validation split (which lives on mark_as_X).
-        # The original scheduler inspected the scored hold-out after every
-        # epoch. Keep its settings and 150 epochs, but monitor a stratified
-        # 20% subset of this fold's OWN training rows to avoid that leakage.
-        train_idx, val_idx = train_test_split(
-            np.arange(len(X)),
-            test_size=self.validation_fraction,
-            random_state=self.random_state,
-            stratify=y,
-        )
-        y_array = np.asarray(y)
         self.model_ = TabularNeuralNet(
             cat_dims, emb_dims, num_features=len(NUM_COLS)
         ).to(self.device_)
@@ -230,22 +219,15 @@ class TorchProbabilityClassifier(ClassifierMixin, BaseEstimator):
             patience=self.scheduler_patience,
         )
 
-        train_cat = torch.tensor(
-            x_cat[train_idx], dtype=torch.long, device=self.device_
-        )
-        train_num = torch.tensor(
-            x_num[train_idx], dtype=torch.float32, device=self.device_
-        )
+        train_cat, train_num = self._tensors(X)
         train_y = torch.tensor(
-            y_array[train_idx], dtype=torch.long, device=self.device_
+            np.asarray(y), dtype=torch.long, device=self.device_
         )
-        val_cat = torch.tensor(
-            x_cat[val_idx], dtype=torch.long, device=self.device_
-        )
-        val_num = torch.tensor(
-            x_num[val_idx], dtype=torch.float32, device=self.device_
-        )
+        X_val, y_val = eval_set
+        val_cat, val_num = self._tensors(X_val)
 
+        # Keep all 150 epochs. The original scheduled on the scored hold-out and
+        # did not restore a best checkpoint. The eval rows arrive from GetXY.
         for _ in range(self.num_epochs):
             self.model_.train()
             permutation = torch.randperm(train_cat.size(0))
@@ -264,22 +246,12 @@ class TorchProbabilityClassifier(ClassifierMixin, BaseEstimator):
                     .cpu()
                     .numpy()
                 )
-            scheduler.step(accuracy_score(y_array[val_idx], val_preds))
+            scheduler.step(accuracy_score(np.asarray(y_val), val_preds))
 
-        # The original uses the final epoch, not a best-epoch checkpoint.
         return self
 
     def predict_proba(self, X):
-        x_cat = torch.tensor(
-            X[CAT_COLS].to_numpy(dtype=np.int64),
-            dtype=torch.long,
-            device=self.device_,
-        )
-        x_num = torch.tensor(
-            X[NUM_COLS].to_numpy(dtype=np.float32),
-            dtype=torch.float32,
-            device=self.device_,
-        )
+        x_cat, x_num = self._tensors(X)
         self.model_.eval()
         with torch.no_grad():
             return torch.softmax(self.model_(x_cat, x_num), dim=1).cpu().numpy()
@@ -368,20 +340,21 @@ with skrub.config_context(eager_data_ops=False):
     # training rows instead; its original leaky score is not reproducible.
     cb_parts = cb_features.skb.apply(GetXY(), y=y, no_wrap=True)
     cb_pred = cb_parts["X"].skb.apply(
-        CatBoostProbabilityClassifier(
+        CatBoostClassifier(
             iterations=600,
             learning_rate=0.03,
             depth=5,
-            cat_features=CAT_COLS,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_parts.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_COLS,
             "eval_set": (cb_parts["X_val"], cb_parts["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
 
     # 3b. Neural preprocessing -- sorted categories match LabelEncoder.
@@ -400,7 +373,17 @@ with skrub.config_context(eager_data_ops=False):
     # Preserve float32 input to the separately fitted StandardScaler.
     nn_num = numeric.astype(np.float32).skb.apply(StandardScaler())
     nn_features = nn_cat.skb.concat([nn_num], axis=1)[FEATURE_COLS]
-    nn_pred = nn_features.skb.apply(TorchProbabilityClassifier(), y=y)
+    
+    cat_dims = nn_features[CAT_COLS].max(axis=0) + 1
+    nn_parts = nn_features.skb.apply(GetXY(), y=y, no_wrap=True)
+    nn_pred = nn_parts["X"].skb.apply(
+        TorchProbabilityClassifier(),
+        y=nn_parts.get("y", y),
+        fit_kwargs={
+            "eval_set": (nn_parts["X_val"], nn_parts["y_val"]),
+            "cat_dims": cat_dims,
+        },
+    )
 
     # 3c. One ensemble, not separate scored variants. Gate arithmetic because
     # predictor nodes evaluate to fitted estimators in fit mode.

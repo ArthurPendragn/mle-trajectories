@@ -73,16 +73,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostPositiveProbability(CatBoostClassifier):
-    """Expose exactly the positive-class probability used by the ensemble."""
-
-    def __sklearn_clone__(self):
-        return type(self)(**self.get_params(deep=False))
-
-    def predict(self, X, **kwargs):
-        return super().predict_proba(X, **kwargs)[:, 1]
-
-
 class NumericalTokenizer(nn.Module):
     def __init__(self, num_features, d_token):
         super().__init__()
@@ -262,6 +252,7 @@ class NeuralPositiveProbability(ClassifierMixin, BaseEstimator):
 def ensemble_predictions(cb_probability, nn_probability, mode):
     if mode == "fit":
         return None
+    cb_probability = np.asarray(cb_probability, dtype=float)[:, 1]
     probabilities = 0.5 * cb_probability + 0.5 * nn_probability
     return (probabilities >= 0.5).astype(int)
 
@@ -362,20 +353,21 @@ with skrub.config_context(eager_data_ops=False):
     nn_parts = nn_features.skb.apply(GetXY(), y=y, no_wrap=True)
 
     cb_probability = cb_parts["X"].skb.apply(
-        CatBoostPositiveProbability(
+        CatBoostClassifier(
             iterations=600,
             learning_rate=0.03,
             depth=5,
-            cat_features=CAT_COLS,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_parts.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_COLS,
             "eval_set": (cb_parts["X_val"], cb_parts["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
     nn_probability = nn_parts["X"].skb.apply(
         NeuralPositiveProbability(

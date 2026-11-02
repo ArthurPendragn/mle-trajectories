@@ -66,17 +66,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostPositiveProbability(CatBoostClassifier):
-    """Expose the positive-class probability to the recorded ensemble."""
-
-    def __sklearn_clone__(self):
-        # Bypass CatBoost's constructor-parameter cloning issue.
-        return CatBoostPositiveProbability(**self.get_params(deep=False))
-
-    def predict(self, X, **kwargs):
-        return self.predict_proba(X, **kwargs)[:, 1]
-
-
 class TransformerBlock(nn.Module):
     def __init__(self, d_token, n_heads, ffn_factor=2, dropout=0.1):
         super().__init__()
@@ -258,6 +247,7 @@ class TorchPositiveProbability(ClassifierMixin, BaseEstimator):
 def ensemble_predictions(cb_probabilities, nn_probabilities, mode):
     if mode == "fit":
         return None
+    cb_probabilities = np.asarray(cb_probabilities, dtype=float)[:, 1]
     probabilities = 0.5 * cb_probabilities + 0.5 * nn_probabilities
     return (probabilities >= 0.5).astype(int)
 
@@ -326,22 +316,22 @@ with skrub.config_context(eager_data_ops=False):
     # patience and iterations, but carve an eval set from training rows instead.
     # Use the original split's fraction, seed, and stratification for this split.
     cb_parts = cb_features.skb.apply(GetXY(), y=y, no_wrap=True)
-    cb_model = CatBoostPositiveProbability(
-        iterations=600,
-        learning_rate=0.03,
-        depth=5,
-        cat_features=CAT_COLS,
-        eval_metric="Accuracy",
-        random_seed=42,
-        verbose=0,
-    )
     cb_probabilities = cb_parts["X"].skb.apply(
-        cb_model,
+        CatBoostClassifier(
+            iterations=600,
+            learning_rate=0.03,
+            depth=5,
+            eval_metric="Accuracy",
+            random_seed=42,
+            verbose=0,
+        ),
         y=cb_parts.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_COLS,
             "eval_set": (cb_parts["X_val"], cb_parts["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
 
     # OrdinalEncoder reproduces the sorted per-column LabelEncoder codes.

@@ -69,16 +69,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostPositiveProbability(CatBoostClassifier):
-    """Keep the original positive-class probability as this branch's output."""
-
-    def __sklearn_clone__(self):
-        return type(self)(**self.get_params(deep=False))
-
-    def predict(self, X, **kwargs):
-        return self.predict_proba(X, **kwargs)[:, 1]
-
-
 class PeriodicNumericalEmbedding(nn.Module):
     def __init__(self, num_features, token_dim, sigma=0.5):
         super().__init__()
@@ -317,6 +307,7 @@ class TorchPositiveProbability(ClassifierMixin, BaseEstimator):
 def ensemble_predictions(cb_probs, nn_probs, mode):
     if mode == "fit":
         return None
+    cb_probs = np.asarray(cb_probs, dtype=float)[:, 1]
     return (0.5 * cb_probs + 0.5 * nn_probs >= 0.5).astype(int)
 
 
@@ -392,20 +383,21 @@ with skrub.config_context(eager_data_ops=False):
     # inner eval split of the outer TRAINING rows, preserving all training limits.
     cb_parts = features.skb.apply(GetXY(), y=y, no_wrap=True)
     cb_pred = cb_parts["X"].skb.apply(
-        CatBoostPositiveProbability(
+        CatBoostClassifier(
             iterations=600,
             learning_rate=0.03,
             depth=5,
-            cat_features=CAT_COLS,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_parts.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_COLS,
             "eval_set": (cb_parts["X_val"], cb_parts["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
 
     # OrdinalEncoder has LabelEncoder's sorted ordering for these string inputs.
