@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import skrub
 from catboost import CatBoostClassifier
-from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin, clone
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.model_selection import StratifiedShuffleSplit, train_test_split
 from xgboost import XGBClassifier
 
@@ -79,11 +79,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostClassifierCloneable(CatBoostClassifier):
-    def __sklearn_clone__(self):
-        return CatBoostClassifierCloneable(**self.get_params(deep=False))
-
-
 class CategoricalVocabulary(TransformerMixin, BaseEstimator):
     """Reuse the training fold's category vocabulary for XGBoost.
 
@@ -100,29 +95,25 @@ class CategoricalVocabulary(TransformerMixin, BaseEstimator):
         return X.astype(self.dtypes_)
 
 
-class PositiveProbability(ClassifierMixin, BaseEstimator):
-    """XGBoost's predict has no probability option; emit P(Survived=1)."""
+class XGBClassifier(XGBClassifier):
+    """skrub calls predict() on an intermediate model.
 
-    def __init__(self, estimator):
-        self.estimator = estimator
+    Return the (n_samples, n_classes) probability matrix. The blend takes
+    column 1, the positive class, as it does for CatBoost.
+    """
 
-    def fit(self, X, y):
-        self.estimator_ = clone(self.estimator).fit(X, y)
-        self.classes_ = self.estimator_.classes_
-        return self
-
-    def predict(self, X):
-        return self.estimator_.predict_proba(X)[:, 1]
+    def predict(self, X, **kwargs):
+        return super().predict_proba(X)
 
 
 def blend_predictions(cb_probability, xgb_probability, mode):
     # Predictor nodes hold fitted estimators, not probabilities, in fit mode.
-    # prediction_type="Probability" returns (n_samples, 2) in classes_ order
-    # [0, 1], so column 1 is the positive-class probability.
+    # Both models' predict() returns (n_samples, 2) in classes_ order [0, 1],
+    # so column 1 is the positive-class probability.
     if mode == "fit":
         return None
     cb_probability = np.asarray(cb_probability, dtype=float)[:, 1]
-    xgb_probability = np.asarray(xgb_probability, dtype=float)
+    xgb_probability = np.asarray(xgb_probability, dtype=float)[:, 1]
     return ((cb_probability + xgb_probability) / 2.0 >= 0.5).astype(int)
 
 
@@ -201,35 +192,33 @@ with skrub.config_context(eager_data_ops=False):
     xgb_features = features.skb.apply(CategoricalVocabulary(), no_wrap=True)
     cb_parts = features.skb.apply(GetXY(), y=y, no_wrap=True)
     cb_probability = cb_parts["X"].skb.apply(
-        CatBoostClassifierCloneable(
+        CatBoostClassifier(
             iterations=500,
             learning_rate=0.05,
             depth=6,
-            cat_features=CAT_FEATURES,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_parts.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_FEATURES,
             "eval_set": (cb_parts["X_val"], cb_parts["y_val"]),
             "verbose": False,
         },
         predict_kwargs={"prediction_type": "Probability"},
     )
     xgb_probability = xgb_features.skb.apply(
-        PositiveProbability(
-            XGBClassifier(
-                n_estimators=300,
-                learning_rate=0.03,
-                max_depth=4,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                enable_categorical=True,
-                tree_method="hist",
-                random_state=42,
-                eval_metric="logloss",
-            )
+        XGBClassifier(
+            n_estimators=300,
+            learning_rate=0.03,
+            max_depth=4,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            enable_categorical=True,
+            tree_method="hist",
+            random_state=42,
+            eval_metric="logloss",
         ),
         y=y,
     )
