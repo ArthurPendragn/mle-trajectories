@@ -79,17 +79,6 @@ class GetXY(TransformerMixin, BaseEstimator):
         return {"X": X, "X_val": None, "y": None, "y_val": None}
 
 
-class CatBoostPositiveProbability(CatBoostClassifier):
-    """Expose the original positive-class probability as this node's output."""
-
-    def __sklearn_clone__(self):
-        # Avoid CatBoost's constructor-parameter cloning issues.
-        return type(self)(**self.get_params(deep=False))
-
-    def predict(self, X):
-        return self.predict_proba(X)[:, 1]
-
-
 class NumericalTokenizer(nn.Module):
     def __init__(self, num_features, d_token):
         super().__init__()
@@ -274,6 +263,9 @@ class NeuralPositiveProbability(ClassifierMixin, BaseEstimator):
 def blend_and_threshold(cb_probs, neural_probs, mode):
     if mode == "fit":
         return None
+    # prediction_type="Probability" returns both classes. Column 1 is the
+    # positive class because Survived labels are 0 and 1.
+    cb_probs = np.asarray(cb_probs, dtype=float)[:, 1]
     return (0.5 * cb_probs + 0.5 * neural_probs >= 0.5).astype(int)
 
 
@@ -360,20 +352,21 @@ with skrub.config_context(eager_data_ops=False):
     #    outer training rows instead, avoiding that validation leakage.
     cb_split = cb_features.skb.apply(GetXY(), y=y, no_wrap=True)
     cb_probs = cb_split["X"].skb.apply(
-        CatBoostPositiveProbability(
+        CatBoostClassifier(
             iterations=600,
             learning_rate=0.03,
             depth=5,
-            cat_features=CAT_COLS,
             eval_metric="Accuracy",
             random_seed=42,
             verbose=0,
         ),
         y=cb_split.get("y", y),
         fit_kwargs={
+            "cat_features": CAT_COLS,
             "eval_set": (cb_split["X_val"], cb_split["y_val"]),
             "early_stopping_rounds": 50,
         },
+        predict_kwargs={"prediction_type": "Probability"},
     )
     ft_probs_base = nn_features.skb.apply(
         NeuralPositiveProbability(use_num_skip=True), y=y
