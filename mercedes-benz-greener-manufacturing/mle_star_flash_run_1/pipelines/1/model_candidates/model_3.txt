@@ -1,0 +1,30 @@
+## Model name
+CatBoost Regressor with Multi-quantile Regularization
+
+## Example Python code
+from catboost import CatBoostRegressor
+from sklearn.metrics import r2_score
+import pandas as pd
+
+def train_catboost(X_train, y_train, X_val, y_val, cat_cols):
+    # Ensure string type for categorical features
+    for c in cat_cols:
+        X_train[c] = X_train[c].astype(str)
+        X_val[c] = X_val[c].astype(str)
+        
+    model = CatBoostRegressor(
+        iterations=1500,
+        learning_rate=0.02,
+        depth=4,
+        l2_leaf_reg=5.0,
+        cat_features=cat_cols,
+        loss_function='RMSE',
+        eval_metric='R2',
+        random_seed=42,
+        early_stopping_rounds=50,
+        verbose=False
+    )
+    model.fit(X_train, y_train, eval_set=(X_val, y_val))
+    preds = model.predict(X_val)
+    print(f"CatBoost Val R2: {r2_score(y_val, preds):.5f}")
+    return model

@@ -1,0 +1,15 @@
+label = "Mercedes-Benz Greener Manufacturing"
+task = "Predict the time a Mercedes-Benz vehicle spends on the test bench."
+note = "Kaggle mercedes-benz-greener-manufacturing train.csv, split so the test set can be scored (see DATA.md)."
+
+[metric]
+name = "r2"
+lower_is_better = false
+
+[prepare]                      # ./get_data.sh downloads the competition, then python -m task_split
+competition = "mercedes-benz-greener-manufacturing"
+train_file = "train.csv"
+target = "y"
+test_size = 0.2
+seed = 42
+strategy = "rows"

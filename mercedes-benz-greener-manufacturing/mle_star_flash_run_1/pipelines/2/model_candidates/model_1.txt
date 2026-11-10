@@ -1,0 +1,46 @@
+## Model name
+LightGBM Regressor with Dimensionality Reduction Features
+
+## Example Python code
+import numpy as np
+import lightgbm as lgb
+from sklearn.decomposition import PCA, FastICA, TruncatedSVD
+from sklearn.pipeline import FeatureUnion
+from sklearn.metrics import r2_score
+
+def train_lgb_with_decomposition(X_train, y_train, X_val, y_val, categorical_cols):
+    # Extract decomposition features to capture dense global variance
+    decomp_union = FeatureUnion([
+        ('pca', PCA(n_components=10, random_state=42)),
+        ('ica', FastICA(n_components=10, random_state=42, max_iter=1000)),
+        ('tsvd', TruncatedSVD(n_components=10, random_state=42))
+    ])
+    
+    decomp_train = decomp_union.fit_transform(X_train.drop(columns=categorical_cols))
+    decomp_val = decomp_union.transform(X_val.drop(columns=categorical_cols))
+    
+    X_tr_feat = np.hstack([X_train.values, decomp_train])
+    X_va_feat = np.hstack([X_val.values, decomp_val])
+    
+    model = lgb.LGBMRegressor(
+        n_estimators=1000,
+        learning_rate=0.01,
+        max_depth=4,
+        num_leaves=15,
+        subsample=0.8,
+        colsample_bytree=0.7,
+        reg_alpha=1.0,
+        reg_lambda=2.0,
+        min_child_samples=20,
+        random_state=42
+    )
+    
+    model.fit(
+        X_tr_feat, y_train,
+        eval_set=[(X_va_feat, y_val)],
+        callbacks=[lgb.early_stopping(50, verbose=False)]
+    )
+    
+    preds = model.predict(X_va_feat)
+    print(f"Validation R2 Score: {r2_score(y_val, preds):.5f}")
+    return model

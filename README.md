@@ -41,13 +41,14 @@ Pipelines read `./input/...`, and both `skrubify --run-in` and
 So `--run-in <dataset>` runs against full data and
 `--run-in <dataset>/sample_<size>` against a sample, with no edit to any pipeline.
 
-Six datasets are Kaggle competitions and have a `get_data.sh` (it formalises
+Seven datasets are Kaggle competitions and have a `get_data.sh` (it formalises
 what `tools/getcomp.sh` did by hand, minus the assumption that every file is a
 flat CSV):
 
 | dataset | competition |
 | --- | --- |
 | `aptos2019-blindness-detection` | `aptos2019-blindness-detection` |
+| `mercedes-benz-greener-manufacturing` | `mercedes-benz-greener-manufacturing` |
 | `playground-series-s6e7` | `playground-series-s6e7` |
 | `tab_playground_dec_21` | `tabular-playground-series-dec-2021` |
 | `nyc_taxi_fare` | `new-york-city-taxi-fare-prediction` |
@@ -57,6 +58,9 @@ flat CSV):
 `titanic`'s script then splits the competition's labeled `train.csv` (stratified
 20%, seed 42) so the test set can be scored. The competition's own test file is
 not what the run saw; `DATA.md` records the split.
+
+`mercedes-benz-greener-manufacturing` does the same with a row holdout (20%,
+seed 42) on `y`, because the target is continuous.
 
 The scripts are idempotent (re-running is a no-op unless passed `--force`) and
 need the competition rules accepted in the browser once, or the download returns
@@ -81,8 +85,8 @@ sampled number was measured on.
 
 ## Corpus
 
-11 dataset folders, 52 agent runs, **1933 pipelines** in total (as of
-2026-11-04). One pipeline = one script the agent actually executed. Skrubified
+12 dataset folders, 53 agent runs, **2014 pipelines** in total (as of
+2026-11-10). One pipeline = one script the agent actually executed. Skrubified
 rewrites (`skrubify*/`) are the same pipeline expressed as a skrub DataOps plan,
 so they are not counted again. `voice-intent` is prepared (data on GCS, task
 description) but has no runs yet. The numbers below come from the website's
@@ -96,6 +100,7 @@ registry and code analysis (`/api/corpus`, `/api/runs/<dataset>/<run>`,
 | aptos2019-blindness-detection | image (retina PNGs + label CSV) | 5-grade ordinal classification | quadratic weighted kappa | 3,662 / 1,928 images | 2 | 86 | – |
 | beaver_enroll | tabular, multi-table (warehouse dump, data discovery) | binary classification | F1 | dozens of tables; not on this machine | 4 | 626 | – |
 | house_price | tabular, single table, temporal | regression, out-of-time split | RMSE on log10(price) | 22.1M / 375k rows | 2 | 59 | – (private labels exist) |
+| mercedes-benz-greener-manufacturing | tabular, single table | regression | R² | 3,367 / 842 rows (split of train.csv) | 1 | 81 | local split (not scored) |
 | nyc-housing-violation | tabular, multi-table (71-table data lake) | binary classification | average precision | lake on GCS | 4 | 155 | – |
 | nyc_taxi_fare | tabular, single table, geo + time | regression | RMSE | 55.4M / 9,914 rows | 14 | 338 | Kaggle public LB |
 | playground-series-s6e7 | tabular, single table (synthetic student health) | 3-class classification | balanced accuracy | 690k / 296k rows | 1 | 24 | – |
@@ -109,7 +114,7 @@ registry and code analysis (`/api/corpus`, `/api/runs/<dataset>/<run>`,
 
 | agent | runs | pipelines | datasets |
 | --- | --- | --- | --- |
-| MLE-STAR | 8 | 861 | 4 |
+| MLE-STAR | 9 | 942 | 5 |
 | meta-mle | 22 | 491 | 4 |
 | mlevolve | 15 | 453 | 6 |
 | Claude Code | 5 | 102 | 3 |
@@ -137,6 +142,7 @@ copies, not agent runs, and are not in the totals.
 | beaver_enroll | mle_star_flash_run_4 | MLE-STAR | Gemini 2.5 Pro | – | **156** | 156 | 0.0000 | – | random forest, LightGBM, TabPFN |
 | house_price | mlevolve_run_1 | mlevolve | Gemini 3.8 Flash | 15 steps / 12 h | **13** | 16 | 0.2203 | – | custom NN, LightGBM |
 | house_price | mlevolve_run_2 | mlevolve | Gemini 3.8 Flash | 50 steps / 16 h | **46** | 51 | 0.2065 | – | LightGBM, custom NN, XGBoost |
+| mercedes-benz-greener-manufacturing | mle_star_flash_run_1 | MLE-STAR | Gemini 3.7 Flash | – | **81** | 81 | 0.6652 | – | CatBoost, Ridge, LightGBM, XGBoost |
 | nyc-housing-violation | mle-claude-run1 | Claude Code | Claude | – | **32** | 32 | 0.7318 | – | HistGB, LightGBM |
 | nyc-housing-violation | mle-claude-run1_v2 | Claude Code | Claude | – | (32) | 32 | 0.7318 | – | HistGB, LightGBM |
 | nyc-housing-violation | mlevolve_run_0 | mlevolve | Gemini 3.8 Flash | 20 steps / 12 h | **18** | 21 | 0.7195 | – | custom NN, LightGBM, CatBoost |
@@ -184,7 +190,7 @@ copies, not agent runs, and are not in the totals.
 | ttt-task | mlevolve_run_2 | mlevolve | Gemini 3.8 Flash | 50 steps / 12 h | **19** | 35 | 0.9161 | 0.8862 | custom NN |
 | ttt-task | mlevolve_run_3 | mlevolve | Gemini 3.8 Flash | 10 steps / 16 h | **8** | 11 | 0.8895 | 0.8525 | custom NN |
 | ttt-task | mlevolve_run_4 | mlevolve | Gemini 3.8 Flash | 100 steps / 36 h | **81** | 101 | 0.9091 | 0.8690 | custom NN, SGD |
-| | | | | | **1933** | | | | |
+| | | | | | **2014** | | | | |
 
 ### Models
 
@@ -198,6 +204,7 @@ with no model class, which is what most ttt-task scripts outside the NNs are.
 | aptos2019-blindness-detection | 2 | 86 | custom NN 100%, timm CNN 100% |
 | beaver_enroll | 4 | 626 | random forest 96%, LightGBM 23%, TabNet 23%, TabPFN 22%, logistic regression 2% |
 | house_price | 2 | 59 | LightGBM 83%, custom NN 66%, XGBoost 36%, CatBoost 24%, Ridge 8% |
+| mercedes-benz-greener-manufacturing | 1 | 81 | CatBoost 91%, Ridge 59%, LightGBM 57%, XGBoost 51%, ElasticNet 47% |
 | nyc-housing-violation | 4 | 155 | LightGBM 83%, custom NN 63%, XGBoost 62%, CatBoost 45%, HistGB 12% |
 | nyc_taxi_fare | 14 | 338 | LightGBM 73%, custom NN 59%, XGBoost 57%, CatBoost 6%, Ridge 4% |
 | playground-series-s6e7 | 1 | 24 | custom NN 100%, CatBoost 100%, XGBoost 100%, LightGBM 100%, ExtraTrees 4% |
@@ -229,11 +236,11 @@ Notes on the counts:
   in `tab_playground_dec_21/mle_claude_run_1`.
 - Lineage nodes are the steps the run's trajectory records. For mlevolve that is
   more than the scripts, because it keeps a script only for nodes that ran. aptos has no state file, so it has no lineage.
-- 181 of the pipelines are ablations: MLE-STAR's `ablation_*.py` (runnable
+- 189 of the pipelines are ablations: MLE-STAR's `ablation_*.py` (runnable
   variants of the current solution, probes rather than candidates) and 5 in
   ttt-task Claude Code runs (`ablation_NN.py` in run 2; `pipeline_05.py` and
   `pipeline_10.py` in run 3, fused-choice grids of 8 and 16 variants). Without
-  them, the corpus is 1752 pipelines.
+  them, the corpus is 1825 pipelines.
 - Degenerate scores: beaver_enroll's best CV values of 1.0 and 0.0 are not
   real (the runs were never validated against real data, see
   `mle_star_flash_run_3/result.txt`). Both aptos runs ended in agent error.
@@ -266,6 +273,8 @@ Notes on the counts:
 - `titanic/mle_star_flash_run_1` ran two solutions: `pipelines/1/`,
   `pipelines/2/` (solution 2's files are named `*_sol2.py`) and
   `pipelines/ensemble/`.
+- `mercedes-benz-greener-manufacturing/mle_star_flash_run_1` is the same shape:
+  two solutions, solution 2 named `*_sol2.py`, and seven ensemble scripts.
 
 ## Tools
 

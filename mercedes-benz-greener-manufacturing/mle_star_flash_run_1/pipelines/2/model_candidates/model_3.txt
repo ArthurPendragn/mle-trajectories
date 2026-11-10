@@ -1,0 +1,27 @@
+## Model name
+CatBoost Regressor with Native Categorical Handling
+
+## Example Python code
+from catboost import CatBoostRegressor
+from sklearn.metrics import r2_score
+
+def train_catboost(X_train, y_train, X_val, y_val, cat_features):
+    # Ordered boosting and target encoding prevent data leakage on categorical variables
+    model = CatBoostRegressor(
+        iterations=1200,
+        learning_rate=0.02,
+        depth=4,
+        l2_leaf_reg=5.0,
+        subsample=0.8,
+        random_seed=42,
+        cat_features=cat_features,
+        eval_metric='RMSE',
+        early_stopping_rounds=50,
+        verbose=False
+    )
+    
+    model.fit(X_train, y_train, eval_set=(X_val, y_val), verbose=False)
+    
+    preds = model.predict(X_val)
+    print(f"Validation R2 Score: {r2_score(y_val, preds):.5f}")
+    return model
