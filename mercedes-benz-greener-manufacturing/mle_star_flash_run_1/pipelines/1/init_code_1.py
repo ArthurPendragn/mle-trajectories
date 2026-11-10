@@ -1,0 +1,64 @@
+import numpy as np
+import pandas as pd
+from sklearn.decomposition import PCA, FastICA, TruncatedSVD
+from sklearn.metrics import r2_score
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import FeatureUnion
+import xgboost as xgb
+
+# Load dataset
+train_df = pd.read_csv('./input/train.csv')
+
+# Separate target and features
+y = train_df['y'].values
+X = train_df.drop(columns=['ID', 'y'])
+
+# Identify categorical features
+cat_cols = X.select_dtypes(include=['object']).columns.tolist()
+
+# Train/validation split
+X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# One-hot encode categoricals
+X_tr_enc = pd.get_dummies(X_train, columns=cat_cols, drop_first=True)
+X_val_enc = pd.get_dummies(X_val, columns=cat_cols, drop_first=True).reindex(columns=X_tr_enc.columns, fill_value=0)
+
+# Extract decomposition features
+dim_reduction = FeatureUnion([
+    ('pca', PCA(n_components=10, random_state=42)),
+    ('ica', FastICA(n_components=10, random_state=42, max_iter=1000, tol=1e-3)),
+    ('tsvd', TruncatedSVD(n_components=10, random_state=42))
+])
+
+decomp_tr = dim_reduction.fit_transform(X_tr_enc)
+decomp_val = dim_reduction.transform(X_val_enc)
+
+X_tr_final = np.hstack([X_tr_enc.values.astype(np.float32), decomp_tr.astype(np.float32)])
+X_val_final = np.hstack([X_val_enc.values.astype(np.float32), decomp_val.astype(np.float32)])
+
+# Initialize and train XGBoost Regressor
+model = xgb.XGBRegressor(
+    n_estimators=1000,
+    learning_rate=0.005,
+    max_depth=4,
+    subsample=0.8,
+    colsample_bytree=0.7,
+    reg_alpha=1.0,
+    reg_lambda=1.0,
+    random_state=42,
+    early_stopping_rounds=50,
+    eval_metric='rmse'
+)
+
+model.fit(
+    X_tr_final,
+    y_train,
+    eval_set=[(X_val_final, y_val)],
+    verbose=False
+)
+
+# Predict on validation set and evaluate R2
+y_val_pred = model.predict(X_val_final)
+final_validation_score = r2_score(y_val, y_val_pred)
+
+print(f"Final Validation Performance: {final_validation_score}")
