@@ -8,6 +8,10 @@ into a skrub DataOps plan, extract the stratum operator DAG, and diff each step
 against its parent. That shows what the agent actually changed from iteration to
 iteration, and what it kept.
 
+For the methodology and current tooling assessment for finding stratum
+optimization targets, see [Benchmarking](BENCHMARKING.md).
+The [HPC adapter](hpc/README.md) runs stratum profiling campaigns with Slurm and Singularity.
+
 ## Layout
 
 ```

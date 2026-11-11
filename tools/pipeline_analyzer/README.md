@@ -253,6 +253,20 @@ Options:
 - `--list`           show what the store holds and what a sweep would run
 - `--out FILE`       store path
 
+Additional profiling controls:
+
+- `--diagnostics-dir DIR` exports stratum's native plan snapshots and per-node,
+  per-mode/fold timings under `DIR/<pipeline>/`; off by default
+- `--implementation-selector default|greedy` selects physical implementations explicitly
+- `--buffer-pool-memory-fraction F` sets the pool budget as a fraction of host
+  RAM in `(0, 1]`, useful when a Slurm allocation is smaller than the host
+
+These options are recorded, but are not all part of cache freshness. Use
+separate stores or `--force` when changing them. `--no-stats` disables timing
+accumulation/reporting; normal scheduler timestamps and buffer accounting remain
+in the inspected stratum build. For Slurm campaigns with retained repetitions
+and native diagnostics, see [the HPC adapter](../../hpc/README.md).
+
 **The store is a cache.** A pipeline already measured with the same code
 (`code_sha1`), the same data (full, or a sample with the same fingerprint) and the same stratum commit is skipped, and
 the store is rewritten after every pipeline, so a sweep can be interrupted and

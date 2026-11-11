@@ -527,7 +527,10 @@ def _load_runtime(run: Run, commit: str | None, annotations: dict) -> None:
         # which data: the run-in folder is the dataset's own (input/) or one of
         # its sample folders; anything else (an old scratch dir) counts as input/
         run_in = Path(meta.get("run_in") or "").name
-        data = run_in if run_in in run.dataset.samples else "input"
+        # HPC stores can be fetched without copying the sampled input bytes.
+        # Its tracked manifest still identifies the sample on this checkout.
+        has_manifest = (run.dataset.path / run_in / MANIFEST).is_file()
+        data = run_in if run_in in run.dataset.samples or has_manifest else "input"
         rs = RuntimeStore(path=path, source=source.name if source else None, data=data,
                           legacy_rows=meta.get("sample_rows"))
         if rs.legacy_rows:

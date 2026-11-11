@@ -1,0 +1,37 @@
+Bootstrap: docker
+From: python:3.14-slim
+
+# Build from the repository root. Source and data are bind-mounted at runtime.
+%files
+    pyproject.toml /opt/benchmark/pyproject.toml
+    uv.lock        /opt/benchmark/uv.lock
+    README.md      /opt/benchmark/README.md
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates git build-essential pkg-config libgomp1 graphviz
+    rm -rf /var/lib/apt/lists/*
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal
+    . "$HOME/.cargo/env"
+    export UV_INSTALL_DIR=/usr/local/bin
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    cd /opt/benchmark
+    UV_PROJECT_ENVIRONMENT=/opt/venv uv sync --frozen --no-dev --no-install-project
+    sha256sum pyproject.toml uv.lock > dependencies.sha256
+    /opt/venv/bin/python -c 'import stratum,skrub,catboost,lightgbm,xgboost; print(stratum.versions())'
+    # CUDA-enabled torch remains as locked, even for CPU-only benchmark jobs.
+    # No --nv bind is used by the CPU worker.
+    rm -rf /root/.cache/uv /root/.cargo/registry /root/.cargo/git
+
+%environment
+    export VIRTUAL_ENV=/opt/venv
+    export PATH=/opt/venv/bin:$PATH
+    export PYTHONUNBUFFERED=1
+    export HF_HUB_DISABLE_TELEMETRY=1
+
+%runscript
+    exec "$@"

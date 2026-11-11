@@ -50,9 +50,11 @@ import argparse
 import json
 import resource
 import runpy
+import sys
 import time
 import traceback
 from collections import defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -164,7 +166,10 @@ def _scores(results) -> list[float]:
 
 def measure(path: Path, *, stats: bool,
             mem_mode: str = "process", mem_interval: float = 0.1,
-            mem_csv: Path | None = None, scoring: str | None = None) -> dict:
+            mem_csv: Path | None = None, scoring: str | None = None,
+            diagnostics_dir: Path | None = None,
+            implementation_selector: str | None = None,
+            buffer_pool_memory_fraction: float | None = None) -> dict:
     import pandas as pd
     import skrub
     import stratum
@@ -195,8 +200,15 @@ def measure(path: Path, *, stats: bool,
         cv = explicit_cv if explicit_cv is not None else _declared_cv(dag)
 
         t0 = time.perf_counter()
-        with stratum.config(scheduler=True, stats=stats, debug_graph=False,
-                            open_graph=False):
+        config = dict(scheduler=True, stats=stats, debug_graph=False, open_graph=False)
+        if implementation_selector is not None:
+            config["implementation_selector"] = implementation_selector
+        if buffer_pool_memory_fraction is not None:
+            config["buffer_pool_memory_fraction"] = buffer_pool_memory_fraction
+        diagnostics = (stratum.dev_config(diagnostics_dir=diagnostics_dir)
+                       if diagnostics_dir is not None else nullcontext())
+        with stratum.config(**config), diagnostics:
+            out["stratum_config"] = stratum.get_config()
             sched = stratum_grid_search(dag=dag, cv=explicit_cv,
                                         scoring=kwargs.get("scoring"))
         wall = time.perf_counter() - t0
@@ -242,6 +254,9 @@ def measure(path: Path, *, stats: bool,
         tracker.start()
     t0 = time.perf_counter()
     try:
+        # Match `python /path/pipeline.py`: runpy.run_path alone does not make
+        # sibling common.py/features.py modules importable from a dataset cwd.
+        sys.path.insert(0, str(path.resolve().parent))
         with skrub.config_context(eager_data_ops=False):
             module = runpy.run_path(str(path), run_name="__main__",
                                     init_globals=meta_mle_namespace(path))
@@ -295,6 +310,7 @@ def measure(path: Path, *, stats: bool,
         resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss) / 1024, 1)
     out["stats_enabled"] = stats
     out["eager_previews"] = False
+    out["diagnostics_dir"] = str(diagnostics_dir) if diagnostics_dir else None
     return out
 
 
@@ -304,6 +320,9 @@ def main(argv=None) -> int:
     ap.add_argument("pipeline", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--no-stats", action="store_true")
+    ap.add_argument("--diagnostics-dir", type=Path, default=None)
+    ap.add_argument("--implementation-selector", choices=("default", "greedy"), default=None)
+    ap.add_argument("--buffer-pool-memory-fraction", type=float, default=None)
     ap.add_argument("--scoring", default=None,
                     help="scorer for a file that only defines `pred`")
     ap.add_argument("--mem-mode", default="process",
@@ -315,7 +334,9 @@ def main(argv=None) -> int:
 
     result = measure(args.pipeline, stats=not args.no_stats, mem_mode=args.mem_mode,
                      mem_interval=args.mem_interval, mem_csv=args.mem_csv,
-                     scoring=args.scoring)
+                     scoring=args.scoring, diagnostics_dir=args.diagnostics_dir,
+                     implementation_selector=args.implementation_selector,
+                     buffer_pool_memory_fraction=args.buffer_pool_memory_fraction)
     args.out.write_text(json.dumps(result))
     return 0 if result.get("status") == "ok" else 1
 

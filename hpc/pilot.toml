@@ -1,0 +1,18 @@
+# One small, historical, local-file DataOps pipeline; no agent or LLM calls.
+# The persisted sample must be prepared separately before running the cell.
+name = "dec21-pilot"
+repetitions = 1
+modes = ["profile"] # add "wall" for separate runs without stats/diagnostics
+timeout_s = 600
+diagnostics = true
+implementation_selector = "default"
+
+[[workloads]]
+run = "tab_playground_dec_21/mle_star"
+source = "skrubify_openai"
+data = "sample_100k" # "input" selects full data
+data_access = "local" # remote permits missing input/; does not redirect reads
+data_version = "dec21-sample-100k-v1" # use a stable source/snapshot identity
+only = ["init_code_1"] # omit to select all registered pipelines in this source
+scoring = "accuracy"
+stage_data = false # true copies local input/ to per-cell temporary storage

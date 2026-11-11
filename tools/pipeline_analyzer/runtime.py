@@ -124,7 +124,9 @@ def is_fresh(entry: dict, path: Path, data: str | None,
 def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
             stats: bool, mem_mode: str = "process",
             mem_interval: float = 0.1, mem_csv: Path | None = None,
-            scoring: str | None = None) -> dict:
+            scoring: str | None = None, diagnostics_dir: Path | None = None,
+            implementation_selector: str | None = None,
+            buffer_pool_memory_fraction: float | None = None) -> dict:
     """Measure one pipeline in a subprocess. Never raises."""
     fd, out_json = tempfile.mkstemp(suffix=".json")
     os.close(fd)
@@ -135,6 +137,12 @@ def run_one(path: Path, *, run_in: Path, python: str, timeout: float,
     cmd += ["--mem-mode", mem_mode, "--mem-interval", str(mem_interval)]
     if scoring:
         cmd += ["--scoring", scoring]
+    if diagnostics_dir is not None:
+        cmd += ["--diagnostics-dir", str(diagnostics_dir.resolve())]
+    if implementation_selector is not None:
+        cmd += ["--implementation-selector", implementation_selector]
+    if buffer_pool_memory_fraction is not None:
+        cmd += ["--buffer-pool-memory-fraction", str(buffer_pool_memory_fraction)]
     if mem_csv:
         mem_csv.parent.mkdir(parents=True, exist_ok=True)
         cmd += ["--mem-csv", str(mem_csv)]
@@ -285,6 +293,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-stats", action="store_true",
                     help="skip stratum's per-operator timing (wall clock only, "
                          "without the instrumentation overhead)")
+    ap.add_argument("--diagnostics-dir", type=Path, default=None,
+                    help="export native stratum plan/node/fold diagnostics below DIR/<pipeline>")
+    ap.add_argument("--implementation-selector", choices=("default", "greedy"), default=None)
+    ap.add_argument("--buffer-pool-memory-fraction", type=float, default=None,
+                    help="fraction of host RAM available to stratum's buffer pool; in (0, 1]")
     ap.add_argument("--mem-mode", default="process",
                     choices=("process", "system", "off"),
                     help="RSS sampling: 'process' this pipeline's interpreter, "
@@ -302,6 +315,8 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true",
                     help="show what the store holds and what a sweep would run")
     args = ap.parse_args(argv)
+    if args.buffer_pool_memory_fraction is not None and not 0 < args.buffer_pool_memory_fraction <= 1:
+        ap.error("--buffer-pool-memory-fraction must be in (0, 1]")
 
     pipe_dirs = [d.resolve() for d in (args.pipelines or [Path("pipelines")])]
     for d in pipe_dirs:
@@ -406,6 +421,9 @@ def main(argv=None) -> int:
         mem_mode=args.mem_mode, mem_interval_s=args.mem_interval,
         mem_csv_dir=str(mem_dir.name) if mem_dir else None,
         versions=versions, scoring=scoring,
+        diagnostics_dir=str(args.diagnostics_dir.resolve()) if args.diagnostics_dir else None,
+        implementation_selector=args.implementation_selector,
+        buffer_pool_memory_fraction=args.buffer_pool_memory_fraction,
     )
 
     failures = 0
@@ -416,7 +434,10 @@ def main(argv=None) -> int:
                         stats=not args.no_stats, mem_mode=args.mem_mode,
                         mem_interval=args.mem_interval,
                         mem_csv=(mem_dir / f"{name}.csv") if mem_dir else None,
-                        scoring=scoring)
+                        scoring=scoring,
+                        diagnostics_dir=(args.diagnostics_dir / name) if args.diagnostics_dir else None,
+                        implementation_selector=args.implementation_selector,
+                        buffer_pool_memory_fraction=args.buffer_pool_memory_fraction)
         entry["path"] = str(path.relative_to(pipe_dirs[0].parent)
                             if path.is_relative_to(pipe_dirs[0].parent) else path)
         # Per entry, not just per store: a sweep interrupted halfway leaves a
