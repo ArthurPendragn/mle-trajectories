@@ -1,0 +1,14 @@
+name = "titanic"
+repetitions = 1
+modes = ["profile"]
+timeout_s = 1800
+diagnostics = true
+implementation_selector = "greedy"
+
+[[workloads]]
+run = "titanic/mle_star_flash_run_1"
+source = "skrubify"
+data = "input"
+data_access = "local"
+data_version = "titanic-labeled-split-seed42-v1"
+scoring = "accuracy"

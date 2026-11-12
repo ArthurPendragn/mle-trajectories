@@ -38,6 +38,7 @@ native libraries, and this repo's frozen `uv.lock`. Source is bind-mounted;
 `PYTHONPATH` exposes the checkout and `tools/`. Dependencies are not reinstalled
 per task. The lock includes CUDA-enabled torch on Linux x86-64, so the image
 will be large even for these CPU jobs; workers do not request GPUs or use `--nv`.
+The build sandbox needs tens of gigabytes; `build.sh` moves it off a small `/tmp` tmpfs.
 
 The synthetic smoke creates 60 rows, scores a linear model with three-fold CV,
 and exercises the real worker, runtime store, memory sampler, and native node

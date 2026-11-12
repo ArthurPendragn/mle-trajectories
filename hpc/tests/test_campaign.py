@@ -47,6 +47,7 @@ class CampaignTests(unittest.TestCase):
     def execute(self, index=0, *, fail=False):
         def runtime(cmd, **kwargs):
             self.command = cmd
+            self.runtime_env = kwargs["env"]
             self.runtime_cwd = Path(cmd[cmd.index("--run-in") + 1])
             self.assertTrue((self.runtime_cwd / "input/train.csv").is_file())
             self.assertIn("--force", cmd)
@@ -127,6 +128,8 @@ class CampaignTests(unittest.TestCase):
         result, _ = self.execute(fail=True)
         self.assertEqual(result, 1)
         self.assertNotEqual(self.runtime_cwd, self.root / "dataset")
+        self.assertEqual(Path(self.runtime_env["SKB_DATA_DIRECTORY"]).parent,
+                         self.runtime_cwd.parent)
         self.assertFalse(self.runtime_cwd.exists()) # temporary stage cleaned up
         result, _ = self.execute()
         self.assertEqual(result, 0)

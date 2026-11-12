@@ -59,7 +59,7 @@ and result browsing rather than building a second job system.
 This assessment is based on repository source and two existing runtime stores,
 reviewed on 2026-11-11. No new pipeline benchmark was executed for this document.
 The installed stratum package and `pyproject.toml` both identify commit
-`70671d10247ec251851d4c09f68589fe98b31bae`. Recheck behavior when changing the pin.
+`4c56c54b35bf43b19be2e5128230e2d9f1ef521c`. Recheck behavior when changing the pin.
 
 | Existing capability | Value for this work |
 | --- | --- |
@@ -491,7 +491,7 @@ workloads, with scope and limitations recorded.
 - [Static DAG extraction](tools/pipeline_analyzer/loader.py)
 - [Analyzer usage and runtime store documentation](tools/pipeline_analyzer/README.md)
 - [DataOps evaluation semantics and pitfalls](tools/skrub_dataops_summary.md)
-- [Pinned stratum source](https://github.com/deem-data/stratum/tree/70671d10247ec251851d4c09f68589fe98b31bae),
+- [Pinned stratum source](https://github.com/deem-data/stratum/tree/4c56c54b35bf43b19be2e5128230e2d9f1ef521c),
   particularly `_api.py`, `_profiler/`, `runtime/_scheduler.py`, and
   `optimizer/logical/_scoring.py`.
 - [CatBoost native training source](https://github.com/catboost/catboost/blob/master/catboost/libs/train_lib/train_model.cpp)

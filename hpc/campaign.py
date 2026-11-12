@@ -333,7 +333,8 @@ def run_cell(manifest, index, *, root=ROOT, dependency_root=Path("/opt/benchmark
                 cmd += ["--diagnostics-dir", str(cell_dir / "diagnostics")]
             env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(root), str(root / "tools")]),
                        TMPDIR=str(scratch), MPLCONFIGDIR=str(scratch / "matplotlib"),
-                       XDG_CACHE_HOME=str(scratch / "cache"))
+                       XDG_CACHE_HOME=str(scratch / "cache"),
+                       SKB_DATA_DIRECTORY=str(scratch / "skrub_data"))
             record.update(command=cmd, effective_run_in=str(effective_run_in))
             attempt = len(list(cell_dir.glob("attempt-*.json"))) + 1
             attempt_path = cell_dir / f"attempt-{attempt:03d}.json"
